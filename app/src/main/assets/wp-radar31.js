@@ -297,7 +297,7 @@
   }
 
   /* ---------- Gas stations + EIA prices ---------- */
-  const gas = { features: null, loading: false, error: "", eia: null, status: null, tiles: new Set() };
+  const gas = { features: null, loading: false, error: "", eia: null, status: null, tiles: new Set(), rev: 0 };
 
   function extractJson(text) {
     const body = String(text || "").trim();
@@ -340,6 +340,7 @@
       gas.features = [];
       gas.error = `Gas stations unavailable: ${error.message || error}`;
     }
+    gas.rev++;
     gas.loading = false;
     loadGasPrices();
     applyAll();
@@ -357,6 +358,7 @@
       if (extra.length) {
         const seen = new Set((gas.features || []).map(f => f.geometry.coordinates.join(",")));
         gas.features = (gas.features || []).concat(extra.filter(f => !seen.has(f.geometry.coordinates.join(","))));
+        gas.rev++;
         applyAll();
       }
     } catch (error) { console.warn("Gas detail tile unavailable", key, error); }
@@ -379,7 +381,7 @@
   }
 
   /* ---------- Tornado shelters ---------- */
-  const shelters = { features: null, loading: false, error: "" };
+  const shelters = { features: null, loading: false, error: "", rev: 0 };
 
   async function loadShelters() {
     if (shelters.loading || shelters.features) return;
@@ -398,13 +400,14 @@
       shelters.features = [];
       shelters.error = `Shelter list unavailable: ${error.message || error}`;
     }
+    shelters.rev++;
     shelters.loading = false;
     applyAll();
     if (isSheetOpen() && P.tab === "map") renderSheet();
   }
 
   /* ---------- Route weather ---------- */
-  const route = { from: null, to: null, results: null, geometry: null, loading: false, error: "", depart: 0, fromResults: [], toResults: [], straight: false };
+  const route = { from: null, to: null, results: null, geometry: null, loading: false, error: "", depart: 0, fromResults: [], toResults: [], straight: false, rev: 0 };
 
   async function geocode(query) {
     if (typeof searchLocationsRaw === "function") return searchLocationsRaw(query, 5);
@@ -456,6 +459,7 @@
       route.error = String(error.message || error);
     }
     route.loading = false;
+    route.rev++;
     applyAll();
     fitRoute();
     renderSheet();
@@ -720,8 +724,8 @@
     if (P.model.on && studio.frame) setModelFrame(map, before);
     else X.removeLayerAndSource(map, "wpx-model");
 
-    setPoints(map, "wpx-gas", P.gas ? fc(gas.features || []) : fc([]), "#ffb020");
-    setPoints(map, "wpx-shelters", P.shelters ? fc(shelters.features || []) : fc([]), "#b56cff");
+    setPoints(map, "wpx-gas", P.gas ? fc(gas.features || []) : fc([]), "#ffb020", `${P.gas}:${gas.rev}`);
+    setPoints(map, "wpx-shelters", P.shelters ? fc(shelters.features || []) : fc([]), "#b56cff", `${P.shelters}:${shelters.rev}`);
     setRoute(map);
   }
 
@@ -758,9 +762,9 @@
     }
   }
 
-  function setPoints(map, id, data, color) {
+  function setPoints(map, id, data, color, changeKey) {
     const had = !!map.getSource(id);
-    X.setGeoJson(map, id, data);
+    X.setGeoJson(map, id, data, changeKey);
     if (!had && map.getSource(id)) {
       X.addLayerOnce(map, { id: `${id}-dot`, type: "circle", source: id, paint: {
         "circle-radius": ["interpolate", ["linear"], ["zoom"], 4, 2.5, 10, 6, 14, 9],
@@ -772,9 +776,8 @@
   }
 
   function setRoute(map) {
-    const data = routeFeatureCollection();
     const had = !!map.getSource("wpx-route");
-    X.setGeoJson(map, "wpx-route", data);
+    X.setGeoJson(map, "wpx-route", routeFeatureCollection(), `route:${route.rev}`);
     if (!had && map.getSource("wpx-route")) {
       X.addLayerOnce(map, { id: "wpx-route-line", type: "line", source: "wpx-route", filter: ["==", ["get", "kind"], "line"], paint: { "line-color": "#52e0fa", "line-width": 4, "line-opacity": 0.85 } });
       X.addLayerOnce(map, { id: "wpx-route-pt", type: "circle", source: "wpx-route", filter: ["==", ["get", "kind"], "point"], paint: { "circle-radius": 8, "circle-color": ["get", "color"], "circle-stroke-color": "#08101f", "circle-stroke-width": 2 } });
@@ -1105,7 +1108,7 @@
     },
     routeDepart: el => { route.depart = Number(el.dataset.h) || 0; renderSheet(); },
     routeGo: () => runRoute(),
-    routeClear: () => { route.geometry = null; route.results = null; route.summary = null; applyAll(); renderSheet(); },
+    routeClear: () => { route.geometry = null; route.results = null; route.summary = null; route.rev++; applyAll(); renderSheet(); },
     armSounding: () => { soundingArmed = !soundingArmed; syncSheetStatus(); if (soundingArmed) say("Tap anywhere on the radar map"); },
     soundingHere: () => openSounding(state.location.latitude, state.location.longitude),
     studioOpen: () => openStudio(),

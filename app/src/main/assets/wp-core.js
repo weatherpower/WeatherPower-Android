@@ -160,9 +160,13 @@
     try { delete map[`__wpxTiles_${id}`]; } catch (_) {}
   }
 
-  function setGeoJson(map, id, data) {
+  // Optional changeKey skips re-sending unchanged data (large point sets re-tile on every setData).
+  function setGeoJson(map, id, data, changeKey) {
     if (!map) return false;
     const source = map.getSource(id);
+    map.__wpxDataKeys = map.__wpxDataKeys || {};
+    if (source && changeKey !== undefined && map.__wpxDataKeys[id] === changeKey) return true;
+    map.__wpxDataKeys[id] = changeKey;
     if (source && source.setData) { source.setData(data); return true; }
     try { map.addSource(id, { type: "geojson", data }); } catch (error) { console.warn("WPX geojson failed", id, error); return false; }
     return false;
