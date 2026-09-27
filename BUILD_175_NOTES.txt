@@ -1,0 +1,42 @@
+WeatherPower 1.8.0 — Build 175
+
+Version name: 1.8.0
+Version code: 175
+
+Radar 3.1 (phone) — tap the "3.1" button on the Radar tab, or More > Radar 3.1 & Tropics
+- Level III site products from the WeatherPower render service: any NEXRAD site,
+  REF/VEL/SRV/CC/ZDR/KDP (tilts 1–4), Echo Tops, Digital VIL (+ any extra products /api/radar/products lists)
+- MRMS hail (MESH), rotation 0–2 km / 3–6 km, rainfall with accumulation windows; tap map for point values
+- Gas stations (WeatherPower feed + EIA weekly averages), tornado shelters
+- Route weather: OSRM driving route, NWS hourly forecast at your ETA + active alerts at each stop
+- Point soundings: HRRR skew-T image (0–18 h) + parameters from the sounding API
+- Model Studio: HRRR / NAM / GFS / ECMWF runs, fields, hour playback, tap-to-probe
+- Palette import: GR2Analyst / GR Level 3 / RadarScope .pal files (sent to the render service as ?pal=)
+
+Tropical Storm Center (More > Tropical Storm Center)
+- Active storms (NHC CurrentStorms.json): intensity, category, pressure, motion, position, advisory time
+- Cones, forecast tracks/points, past tracks, coastal watches/warnings, 7-day outlook (NHC MapServer)
+- GOES-19/GOES-18 sector imagery and storm floaters (NOAA/NESDIS STAR)
+
+Android TV
+- Leanback launcher entry + 320x180 banner; touchscreen/camera/location not required
+- 10-foot UI with D-pad focus: Live Radar, Tropical, Alerts, Forecast, Models, Ambient
+- Live Radar: select "Move map", then arrows pan, OK zooms in, Back zooms out; Menu returns to the layer bar;
+  Play/Pause toggles the loop. Ambient mode starts after 10 minutes idle.
+- Test on an emulator: Android Studio > Device Manager > Television (1080p) image, install the debug APK.
+
+Code layout
+- app/src/main/assets/wp-core.js      shared helpers + ALL WeatherPower server paths (API object)
+- app/src/main/assets/wp-radar31.js   Radar 3.1 tools on the existing radar map
+- app/src/main/assets/wp-tropical.js  Tropical Storm Center
+- app/src/main/assets/wp-tv.js        Android TV shell
+- app/src/main/assets/wp-extras.css   styles for all of the above
+- MainActivity: TV detection bridge (isTelevision, setKeepScreenOn), JS-aware Back, media/menu keys,
+  non-image file picker for .pal, external links open in the browser
+
+Server paths to verify against the Radar 3.1 reference blocks (edit the API object in wp-core.js if different):
+- /api/radar/tile/<key>/…, /api/radar/live/<SITE>/<PRODUCT>/…, /api/mrms/tile/<key>/…
+- /api/models/hours/<model>/<run>, /api/models/frame/<model>/<run>/<field>/<fhr>, /api/models/probe/…
+- the ?pal= value (currently base64url of the .pal text without comments)
+
+CI: .github/workflows/android-debug.yml builds a debug APK on every push and uploads it as an artifact.

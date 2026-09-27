@@ -1,0 +1,216 @@
+/* WeatherPower add-ons: Radar 3.1 sheet, overlays, Tropical Storm Center, Android TV 10-foot UI. */
+:root {
+  --wpx-bg: #06121a;
+  --wpx-panel: rgba(8, 22, 31, 0.97);
+  --wpx-card: rgba(255, 255, 255, 0.05);
+  --wpx-line: rgba(129, 229, 246, 0.18);
+  --wpx-text: #eefcff;
+  --wpx-muted: #9db4bb;
+  --wpx-accent: #52e0fa;
+  --wpx-focus: #ffd84d;
+}
+
+/* ---------- Shared controls ---------- */
+.wpx-btn, .wpx-chip, .wpx-icon-btn, .wpx-result {
+  font: inherit; color: var(--wpx-text); background: var(--wpx-card); border: 1px solid var(--wpx-line);
+  border-radius: 10px; cursor: pointer; -webkit-tap-highlight-color: transparent;
+}
+.wpx-btn { padding: 9px 14px; font-weight: 700; font-size: 14px; }
+.wpx-btn.primary, .wpx-chip.active { background: linear-gradient(135deg, #52e0fa, #2d8cff); color: #041018; border-color: transparent; }
+.wpx-btn.subtle { background: transparent; color: var(--wpx-muted); }
+.wpx-btn:disabled, .wpx-chip:disabled { opacity: 0.4; cursor: default; }
+.wpx-chip { padding: 7px 11px; font-size: 13px; font-weight: 700; white-space: nowrap; }
+.wpx-icon-btn { width: 36px; height: 36px; font-size: 22px; line-height: 1; display: grid; place-items: center; flex: none; }
+.wpx-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+.wpx-btnrow { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 4px; }
+.wpx-inline { display: flex; gap: 8px; align-items: center; }
+.wpx-inline select, .wpx-inline input[type="search"] { flex: 1; min-width: 0; }
+.wpx-sheet select, .wpx-sheet input[type="search"], .wpx-overlay select {
+  font: inherit; font-size: 14px; color: var(--wpx-text); background: rgba(0, 0, 0, 0.35); border: 1px solid var(--wpx-line);
+  border-radius: 10px; padding: 9px 10px; width: 100%;
+}
+.wpx-sheet input[type="range"], .wpx-overlay input[type="range"] { width: 100%; accent-color: var(--wpx-accent); }
+.wpx-label { font-size: 12px; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase; color: var(--wpx-muted); margin: 12px 0 4px; display: flex; justify-content: space-between; }
+.wpx-note { color: var(--wpx-muted); font-size: 13px; margin: 6px 0; line-height: 1.4; }
+.wpx-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; }
+.wpx-row small { display: block; color: var(--wpx-muted); font-size: 12px; }
+.wpx-card { background: var(--wpx-card); border: 1px solid var(--wpx-line); border-radius: 14px; padding: 12px; margin: 10px 0; }
+.wpx-card h3, .wpx-card h4 { margin: 4px 0 8px; }
+.wpx-card h4 { font-size: 13px; color: var(--wpx-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-top: 14px; }
+.wpx-kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; margin: 8px 0; }
+.wpx-kv > div { background: rgba(0, 0, 0, 0.22); border-radius: 10px; padding: 8px 10px; }
+.wpx-kv small { display: block; color: var(--wpx-muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+.wpx-kv strong { display: block; font-size: 16px; }
+.wpx-kv em { display: block; font-style: normal; color: var(--wpx-muted); font-size: 12px; }
+.wpx-switch { position: relative; width: 48px; height: 28px; flex: none; }
+.wpx-switch input { opacity: 0; width: 100%; height: 100%; margin: 0; position: absolute; inset: 0; z-index: 1; cursor: pointer; }
+.wpx-switch span { position: absolute; inset: 0; border-radius: 999px; background: rgba(255, 255, 255, 0.18); transition: background 0.2s; }
+.wpx-switch span::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: #fff; transition: transform 0.2s; }
+.wpx-switch input:checked + span { background: var(--wpx-accent); }
+.wpx-switch input:checked + span::after { transform: translateX(20px); }
+.wpx-file { position: relative; overflow: hidden; white-space: nowrap; }
+.wpx-file input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.wpx-palbar { height: 14px; border-radius: 7px; margin-top: 8px; border: 1px solid var(--wpx-line); }
+.wpx-palscale { display: flex; justify-content: space-between; color: var(--wpx-muted); font-size: 11px; }
+.wpx-results { display: grid; gap: 4px; margin: 6px 0; }
+.wpx-result { text-align: left; padding: 8px 10px; }
+.wpx-result small { display: block; color: var(--wpx-muted); }
+.wpx-route-stop { border-left: 4px solid #5ee7a0; background: var(--wpx-card); border-radius: 10px; padding: 8px 10px; margin: 8px 0; font-size: 14px; line-height: 1.4; }
+.wpx-route-stop.alert { border-left-color: #ff4d4d; }
+.wpx-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.wpx-table th, .wpx-table td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--wpx-line); }
+.wpx-table th { color: var(--wpx-muted); font-size: 11px; text-transform: uppercase; }
+.wpx-tag { border-left: 6px solid var(--c); background: var(--wpx-card); padding: 6px 10px; border-radius: 8px; font-weight: 700; font-size: 13px; }
+.wpx-popup .maplibregl-popup-content { background: #0a1a24; color: var(--wpx-text); border: 1px solid var(--wpx-line); border-radius: 12px; font-size: 13px; line-height: 1.45; }
+.wpx-popup .maplibregl-popup-tip { border-top-color: #0a1a24; border-bottom-color: #0a1a24; }
+.wpx-popup .maplibregl-popup-close-button { color: var(--wpx-text); font-size: 18px; }
+
+/* Radar 3.1 button in the radar side rail */
+.radar-round.wpx-r31-btn { font-weight: 900; font-size: 13px; letter-spacing: -0.02em; color: #041018; background: linear-gradient(135deg, #52e0fa, #b56cff); border-color: transparent; }
+
+/* ---------- Radar 3.1 bottom sheet ---------- */
+.wpx-sheet {
+  position: fixed; left: max(8px, var(--wp-safe-left, 0px)); right: max(8px, var(--wp-safe-right, 0px)); bottom: calc(8px + var(--wp-safe-bottom, 0px));
+  z-index: 1200; max-height: min(62vh, 560px); display: flex; flex-direction: column; color: var(--wpx-text);
+  background: var(--wpx-panel); border: 1px solid var(--wpx-line); border-radius: 18px; box-shadow: 0 20px 50px rgba(0, 0, 0, 0.55);
+  font-family: inherit; animation: wpx-rise 0.18s ease-out;
+}
+@media (min-width: 760px) { .wpx-sheet { left: auto; width: 420px; right: 16px; bottom: 16px; max-height: calc(100vh - 120px); } }
+.wpx-sheet-head { display: flex; align-items: center; gap: 8px; padding: 10px 10px 8px 14px; border-bottom: 1px solid var(--wpx-line); }
+.wpx-sheet-head > strong { flex: none; font-size: 15px; }
+.wpx-tabs { display: flex; gap: 6px; overflow-x: auto; flex: 1; scrollbar-width: none; }
+.wpx-tabs::-webkit-scrollbar { display: none; }
+.wpx-sheet-body { overflow-y: auto; padding: 8px 14px 14px; -webkit-overflow-scrolling: touch; }
+@keyframes wpx-rise { from { transform: translateY(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+/* ---------- Full-screen overlays ---------- */
+.wpx-overlay {
+  position: fixed; inset: 0; z-index: 1400; display: flex; flex-direction: column; background: var(--wpx-bg); color: var(--wpx-text);
+  padding: var(--wp-safe-top, 0px) var(--wp-safe-right, 0px) var(--wp-safe-bottom, 0px) var(--wp-safe-left, 0px);
+  transform: translateY(12px); opacity: 0; transition: transform 0.18s ease, opacity 0.18s ease;
+}
+.wpx-overlay.open { transform: none; opacity: 1; }
+.wpx-overlay-head { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--wpx-line); }
+.wpx-overlay-head strong { font-size: 18px; flex: 1; }
+.wpx-overlay-body { flex: 1; overflow-y: auto; padding: 0 12px 16px; -webkit-overflow-scrolling: touch; }
+.wpx-snd-img img, .wpx-sat img { display: block; width: 100%; height: auto; border-radius: 10px; background: #000; }
+
+/* ---------- Tropical Storm Center ---------- */
+.wpx-tropical .wpx-overlay-body { padding: 0; display: flex; }
+.wpx-trop-layout { display: flex; flex-direction: column; flex: 1; min-height: 0; width: 100%; }
+.wpx-trop-map { height: 44vh; min-height: 240px; flex: none; background: #03101a; }
+.wpx-trop-panel { flex: 1; overflow-y: auto; padding: 8px 12px 18px; -webkit-overflow-scrolling: touch; }
+@media (min-width: 900px) {
+  .wpx-trop-layout { flex-direction: row; }
+  .wpx-trop-map { height: auto; flex: 1.4; }
+  .wpx-trop-panel { flex: 1; max-width: 520px; }
+}
+.wpx-trop-tabs { margin: 6px 0; }
+.wpx-trop-toggles .wpx-chip.toggle:not(.active) { opacity: 0.7; }
+.wpx-trop-storm { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; padding: 12px; margin: 8px 0; border-radius: 14px; border: 1px solid var(--wpx-line); background: var(--wpx-card); color: var(--wpx-text); font: inherit; cursor: pointer; }
+.wpx-trop-storm.active { border-color: var(--storm); box-shadow: inset 4px 0 0 var(--storm); }
+.wpx-trop-storm strong { display: block; font-size: 16px; }
+.wpx-trop-storm small { color: var(--wpx-muted); }
+.wpx-trop-dot { width: 14px; height: 14px; border-radius: 50%; background: var(--storm); box-shadow: 0 0 0 4px color-mix(in srgb, var(--storm) 25%, transparent); flex: none; }
+.wpx-trop-title { display: flex; gap: 12px; align-items: center; }
+.wpx-trop-title h3 { margin: 0; font-size: 20px; }
+.wpx-trop-title small { color: var(--wpx-muted); }
+.wpx-trop-detail { border-color: var(--storm); }
+
+/* ---------- Android TV (10-foot UI) ---------- */
+html.wpx-tv-active, html.wpx-tv-active body { overflow: hidden; background: #02090e; }
+html.wpx-tv-active .app { visibility: hidden; }
+.wpx-tv {
+  position: fixed; inset: 0; z-index: 1300; display: flex; color: var(--wpx-text); background: radial-gradient(circle at 70% 0%, #0b2a3a 0%, #02090e 60%);
+  font-size: 22px; line-height: 1.35; padding: 27px 48px; gap: 28px; box-sizing: border-box;
+}
+.wpx-tv *:focus { outline: none; }
+.wpx-tv :focus-visible, .wpx-tv :focus,
+html.wpx-tv-active .wpx-overlay :focus {
+  outline: 4px solid var(--wpx-focus) !important; outline-offset: 4px; box-shadow: 0 0 0 8px rgba(255, 216, 77, 0.22), 0 12px 30px rgba(0, 0, 0, 0.5);
+}
+.wpx-tv-chip, .wpx-tv-card, .wpx-tv-nav, .wpx-tv .wpx-chip, .wpx-tv .wpx-trop-storm, .wpx-tv .wpx-btn { position: relative; }
+.wpx-tv-chip:focus, .wpx-tv-card:focus, .wpx-tv-nav:focus, .wpx-tv .wpx-chip:focus, .wpx-tv .wpx-trop-storm:focus, .wpx-tv .wpx-btn:focus { z-index: 2; }
+.wpx-tv-rail { width: 250px; flex: none; display: flex; flex-direction: column; gap: 8px; }
+.wpx-tv-brand { display: flex; align-items: center; gap: 12px; font-weight: 900; font-size: 24px; margin: 4px 0 18px; }
+.wpx-tv-brand img { width: 44px; height: 44px; border-radius: 12px; }
+.wpx-tv-nav { display: flex; align-items: center; gap: 14px; padding: 14px 18px; font: inherit; font-size: 22px; font-weight: 700; color: var(--wpx-muted); background: transparent; border: 2px solid transparent; border-radius: 16px; text-align: left; transition: transform 0.12s, background 0.12s; }
+.wpx-tv-nav.active { color: var(--wpx-text); background: rgba(82, 224, 250, 0.12); border-color: rgba(82, 224, 250, 0.35); }
+.wpx-tv-nav:focus { transform: scale(1.05); color: #041018; background: var(--wpx-accent); }
+.wpx-tv-glyph { width: 32px; text-align: center; font-size: 24px; }
+.wpx-tv-rail-foot { margin-top: auto; color: var(--wpx-muted); }
+.wpx-tv-clock { font-size: 40px; font-weight: 800; color: var(--wpx-text); }
+.wpx-tv-main { flex: 1; min-width: 0; position: relative; border-radius: 22px; overflow: hidden; background: rgba(0, 0, 0, 0.25); }
+.wpx-tv-main.screen-alerts, .wpx-tv-main.screen-forecast { overflow-y: auto; }
+.wpx-tv-page { padding: 18px 28px 28px; }
+.wpx-tv-page h1 { font-size: 44px; margin: 6px 0 16px; }
+.wpx-tv-page h1 small { font-size: 24px; color: var(--wpx-muted); font-weight: 600; margin-left: 10px; }
+.wpx-tv-page h2 { font-size: 26px; margin: 26px 0 12px; color: var(--wpx-muted); }
+.wpx-tv .wpx-note, html.wpx-tv-active .wpx-note { font-size: 18px; }
+.wpx-tv .lead { font-size: 26px; }
+.wpx-tv-row { display: flex; gap: 14px; align-items: stretch; }
+.wpx-tv-row.wrap { flex-wrap: wrap; }
+.wpx-tv-row.scroll { overflow-x: auto; padding: 10px 6px 14px; scrollbar-width: none; }
+.wpx-tv-row.scroll::-webkit-scrollbar { display: none; }
+.wpx-tv-chip { font: inherit; font-size: 20px; font-weight: 700; padding: 12px 20px; border-radius: 14px; color: var(--wpx-text); background: rgba(255, 255, 255, 0.08); border: 2px solid rgba(255, 255, 255, 0.14); white-space: nowrap; transition: transform 0.12s; }
+.wpx-tv-chip.active { background: rgba(82, 224, 250, 0.2); border-color: var(--wpx-accent); }
+.wpx-tv-chip.primary { background: var(--wpx-accent); color: #041018; border-color: transparent; }
+.wpx-tv-chip:focus { transform: scale(1.06); }
+.wpx-tv-card { font: inherit; color: var(--wpx-text); text-align: left; display: flex; flex-direction: column; gap: 6px; padding: 18px 20px; border-radius: 18px; background: rgba(255, 255, 255, 0.06); border: 2px solid rgba(255, 255, 255, 0.1); min-width: 170px; transition: transform 0.12s; }
+.wpx-tv-card:focus { transform: scale(1.04); }
+.wpx-tv-card strong { font-size: 28px; }
+.wpx-tv-card small { color: var(--wpx-muted); font-size: 18px; }
+.wpx-tv-card em { font-style: normal; color: var(--wpx-muted); font-size: 22px; }
+.wpx-tv-card.alert { border-left: 10px solid var(--c); width: calc(50% - 14px); min-width: 360px; }
+.wpx-tv-card.alert strong { font-size: 26px; }
+.wpx-tv-card.alert span { color: var(--wpx-muted); font-size: 19px; }
+.wpx-tv-card.hour, .wpx-tv-card.day { align-items: center; text-align: center; min-width: 150px; }
+.wpx-tv-card.calm { width: 100%; }
+.wpx-tv-now { display: flex; align-items: center; gap: 30px; padding: 18px 24px; border-radius: 20px; background: rgba(255, 255, 255, 0.05); }
+.wpx-tv-now .big { font-size: 110px; font-weight: 800; line-height: 1; }
+.wpx-tv-now strong { display: block; font-size: 34px; }
+.wpx-tv-now span { color: var(--wpx-muted); }
+.wpx-tv-kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; margin: 12px 0 18px; }
+.wpx-tv-kv > div { background: rgba(255, 255, 255, 0.06); border-radius: 14px; padding: 14px 16px; }
+.wpx-tv-kv small { display: block; color: var(--wpx-muted); font-size: 16px; text-transform: uppercase; }
+.wpx-tv-detail h1 { border-left: 12px solid var(--c); padding-left: 16px; }
+.wpx-tv-text { font-size: 22px; line-height: 1.5; background: rgba(0, 0, 0, 0.25); border-radius: 16px; padding: 18px 22px; max-height: 46vh; overflow-y: auto; }
+.wpx-tv-input { font: inherit; font-size: 22px; padding: 12px 16px; border-radius: 14px; color: var(--wpx-text); background: rgba(0, 0, 0, 0.35); border: 2px solid rgba(255, 255, 255, 0.18); min-width: 380px; }
+
+.wpx-tv-radar, .wpx-tv-models { position: absolute; inset: 0; }
+.wpx-tv-map { position: absolute; inset: 0; background: #03101a; }
+.wpx-tv-radar.map-mode .wpx-tv-map { outline: 4px solid var(--wpx-focus); outline-offset: -4px; }
+.wpx-tv .wpx-tv-radar .wpx-tv-map:focus { box-shadow: none; outline-offset: -4px; }
+.wpx-tv-radar-info { position: absolute; top: 18px; left: 18px; z-index: 3; background: rgba(2, 9, 14, 0.82); border-radius: 16px; padding: 12px 18px; display: flex; flex-direction: column; }
+.wpx-tv-radar-info strong { font-size: 28px; }
+.wpx-tv-radar-info span { color: var(--wpx-muted); font-size: 20px; }
+.wpx-tv-radar-hint { position: absolute; top: 18px; right: 18px; z-index: 3; background: rgba(2, 9, 14, 0.82); border-radius: 14px; padding: 10px 16px; font-size: 18px; color: var(--wpx-muted); }
+.wpx-tv-layerbar { position: absolute; left: 14px; right: 14px; bottom: 14px; z-index: 3; display: flex; gap: 10px; flex-wrap: wrap; padding: 12px; border-radius: 18px; background: rgba(2, 9, 14, 0.86); }
+.wpx-tv-models .wpx-tv-map { right: 440px; }
+.wpx-tv-model-panel { position: absolute; top: 0; right: 0; bottom: 0; width: 440px; overflow-y: auto; padding: 14px 20px; background: rgba(2, 9, 14, 0.9); }
+.wpx-tv-model-panel h1 { font-size: 34px; margin: 6px 0 12px; }
+.wpx-tv-model-panel h2 { font-size: 22px; color: var(--wpx-muted); margin: 18px 0 8px; }
+.wpx-tv-model-panel .wpx-tv-chip { font-size: 18px; padding: 10px 14px; }
+
+/* Tropical center mounted in the TV shell */
+.wpx-tv-main.screen-tropical .wpx-trop-layout { position: absolute; inset: 0; flex-direction: row; }
+.wpx-tv-main.screen-tropical .wpx-trop-map { height: auto; flex: 1.3; }
+.wpx-tv-main.screen-tropical .wpx-trop-panel { flex: 1; max-width: 620px; padding: 16px 20px; font-size: 20px; }
+.wpx-tv .wpx-chip, html.wpx-tv-active .wpx-overlay .wpx-chip, html.wpx-tv-active .wpx-overlay .wpx-btn { font-size: 18px; padding: 10px 16px; }
+.wpx-tv .wpx-trop-storm strong { font-size: 24px; }
+.wpx-tv .wpx-trop-storm small, .wpx-tv .wpx-table { font-size: 18px; }
+.wpx-tv .wpx-kv strong { font-size: 22px; }
+.wpx-tv .wpx-kv small, .wpx-tv .wpx-kv em { font-size: 15px; }
+html.wpx-tv-active .wpx-overlay { font-size: 22px; padding: 27px 48px; }
+html.wpx-tv-active .wpx-overlay-head strong { font-size: 30px; }
+
+/* Ambient mode */
+.wpx-tv-ambient { position: fixed; inset: 0; z-index: 1600; background: #000; }
+.wpx-tv-ambient .wpx-tv-map { opacity: 0.9; }
+.wpx-amb-card { position: absolute; left: 64px; bottom: 64px; z-index: 2; background: rgba(0, 0, 0, 0.55); border-radius: 26px; padding: 26px 34px; color: #fff; transition: transform 2s ease; }
+.wpx-amb-clock { font-size: 88px; font-weight: 800; line-height: 1; }
+.wpx-amb-temp { font-size: 64px; font-weight: 800; margin-top: 8px; }
+.wpx-amb-sum { font-size: 28px; }
+.wpx-amb-loc { font-size: 22px; color: #b9d3da; }
+.wpx-amb-ticker { position: absolute; top: 40px; left: 64px; right: 64px; z-index: 2; background: rgba(160, 20, 20, 0.8); color: #fff; font-size: 24px; font-weight: 700; padding: 12px 20px; border-radius: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wpx-more-glyph { width: 24px; height: 24px; display: grid; place-items: center; font-size: 20px; flex: none; }

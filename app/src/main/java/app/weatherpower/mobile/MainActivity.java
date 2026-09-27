@@ -7,11 +7,13 @@ import android.app.Activity;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
+import android.app.UiModeManager;
 import android.content.ClipData;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.BitmapFactory;
 import android.net.Uri;
@@ -21,9 +23,11 @@ import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.MediaStore;
+import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
+import android.view.WindowManager;
 import android.webkit.CookieManager;
 import android.webkit.GeolocationPermissions;
 import android.webkit.JavascriptInterface;
@@ -70,7 +74,7 @@ public class MainActivity extends Activity {
     private static final int PERMISSION_REQUEST_CODE = 100;
     private static final int FILE_CHOOSER_REQUEST_CODE = 101;
     private static final int NOTIFICATION_PERMISSION_REQUEST_CODE = 102;
-    private static final String START_URL = "https://appassets.androidplatform.net/assets/index.html?wpv=180-code131-api36-20260811";
+    private static final String START_URL = "https://appassets.androidplatform.net/assets/index.html?wpv=190-code175-radar31-tv";
     private static final String NOTIFICATION_CHANNEL_ID = "weatherpower_alerts";
     private static final String NOTIFICATION_CHANNEL_NAME = "WeatherPower Alerts";
     private static final String WEATHERPOWER_USER_AGENT = "WeatherPowerAndroid/1.8.0 (weatherpower.app; joshua.yarbrough@weatherpower.app)";
@@ -85,9 +89,12 @@ public class MainActivity extends Activity {
     private Object predictiveBackCallback;
     private final ExecutorService networkExecutor = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private boolean isTelevision;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        isTelevision = detectTelevision();
         configureSystemBars();
         createNotificationChannel();
 
@@ -98,7 +105,7 @@ public class MainActivity extends Activity {
         registerPredictiveBack();
         WidgetRefreshReceiver.schedule(this);
         WidgetRefreshReceiver.refreshIfStale(this);
-        if (savedInstanceState == null) webView.loadUrl(START_URL);
+        if (savedInstanceState == null) webView.loadUrl(isTelevision ? START_URL + "&tv=1" : START_URL);
         else webView.restoreState(savedInstanceState);
     }
 
@@ -124,6 +131,14 @@ public class MainActivity extends Activity {
         }
     }
 
+    private boolean detectTelevision() {
+        UiModeManager uiModeManager = (UiModeManager) getSystemService(Context.UI_MODE_SERVICE);
+        if (uiModeManager != null && uiModeManager.getCurrentModeType() == Configuration.UI_MODE_TYPE_TELEVISION) return true;
+        PackageManager pm = getPackageManager();
+        return pm.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
+            || pm.hasSystemFeature("android.software.leanback_only");
+    }
+
     @SuppressLint({"SetJavaScriptEnabled", "JavascriptInterface"})
     private void setupWebView() {
         webView = new WebView(this);
@@ -132,6 +147,8 @@ public class MainActivity extends Activity {
             ViewGroup.LayoutParams.MATCH_PARENT
         ));
         webView.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        webView.setFocusable(true);
+        webView.setFocusableInTouchMode(true);
         webView.setBackgroundColor(Color.rgb(3, 11, 16));
 
         // Keep the WebView's layout viewport inside the real system-bar area. Applying
@@ -181,6 +198,7 @@ public class MainActivity extends Activity {
         webView.setWebChromeClient(new WeatherPowerChromeClient());
         setContentView(container);
         ViewCompat.requestApplyInsets(container);
+        if (isTelevision) webView.requestFocus();
     }
 
     private void requestBasePermissions() {
@@ -193,7 +211,7 @@ public class MainActivity extends Activity {
         if (checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             permissions.add(Manifest.permission.ACCESS_COARSE_LOCATION);
         }
-        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+        if (!isTelevision && checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             permissions.add(Manifest.permission.CAMERA);
         }
 
@@ -358,11 +376,57 @@ public class MainActivity extends Activity {
     }
 
     private void handleBackNavigation() {
-        if (webView != null && webView.canGoBack()) {
-            webView.goBack();
-        } else {
+        if (webView == null) {
             finish();
+            return;
         }
+        // Give the page a chance to close sheets, zoom the TV radar out, or step back a TV screen.
+        webView.evaluateJavascript("(function(){try{return !!(window.wpHandleBack&&window.wpHandleBack());}catch(e){return false;}})()", value -> {
+            if ("true".equals(value)) return;
+            if (webView != null && webView.canGoBack()) {
+                webView.goBack();
+            } else {
+                finish();
+            }
+        });
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (isTelevision && webView != null && event.getAction() == KeyEvent.ACTION_DOWN) {
+            String key = null;
+            switch (event.getKeyCode()) {
+                case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
+                case KeyEvent.KEYCODE_MEDIA_PLAY:
+                case KeyEvent.KEYCODE_MEDIA_PAUSE:
+                    key = "playpause";
+                    break;
+                case KeyEvent.KEYCODE_MENU:
+                    key = "menu";
+                    break;
+                case KeyEvent.KEYCODE_CHANNEL_UP:
+                case KeyEvent.KEYCODE_PAGE_UP:
+                    key = "zoomin";
+                    break;
+                case KeyEvent.KEYCODE_CHANNEL_DOWN:
+                case KeyEvent.KEYCODE_PAGE_DOWN:
+                    key = "zoomout";
+                    break;
+                case KeyEvent.KEYCODE_MEDIA_FAST_FORWARD:
+                    key = "next";
+                    break;
+                case KeyEvent.KEYCODE_MEDIA_REWIND:
+                    key = "prev";
+                    break;
+                default:
+                    break;
+            }
+            if (key != null) {
+                webView.evaluateJavascript("window.wpTvKey && window.wpTvKey(\"" + key + "\");", null);
+                return true;
+            }
+        }
+        return super.dispatchKeyEvent(event);
     }
 
     private void registerPredictiveBack() {
@@ -574,6 +638,19 @@ public class MainActivity extends Activity {
         }
 
         @JavascriptInterface
+        public boolean isTelevision() {
+            return isTelevision;
+        }
+
+        @JavascriptInterface
+        public void setKeepScreenOn(boolean keepOn) {
+            runOnUiThread(() -> {
+                if (keepOn) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            });
+        }
+
+        @JavascriptInterface
         public String fetchUrl(String url) {
             return MainActivity.this.httpGetString(url);
         }
@@ -707,15 +784,16 @@ public class MainActivity extends Activity {
             }
             fileUploadCallback = filePathCallback;
 
+            boolean imagesOnly = acceptsOnlyImages(fileChooserParams);
             Intent contentIntent = new Intent(Intent.ACTION_GET_CONTENT);
             contentIntent.addCategory(Intent.CATEGORY_OPENABLE);
-            contentIntent.setType("image/*");
+            contentIntent.setType(imagesOnly ? "image/*" : "*/*");
             contentIntent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, false);
 
-            Intent cameraIntent = createCameraIntent();
+            Intent cameraIntent = imagesOnly ? createCameraIntent() : null;
             Intent chooserIntent = new Intent(Intent.ACTION_CHOOSER);
             chooserIntent.putExtra(Intent.EXTRA_INTENT, contentIntent);
-            chooserIntent.putExtra(Intent.EXTRA_TITLE, "WeatherPower photo");
+            chooserIntent.putExtra(Intent.EXTRA_TITLE, imagesOnly ? "WeatherPower photo" : "WeatherPower file");
             if (cameraIntent != null) {
                 chooserIntent.putExtra(Intent.EXTRA_INITIAL_INTENTS, new Intent[] { cameraIntent });
             }
@@ -730,7 +808,35 @@ public class MainActivity extends Activity {
         }
     }
 
+    private static boolean acceptsOnlyImages(WebChromeClient.FileChooserParams params) {
+        if (params == null || params.getAcceptTypes() == null) return true;
+        // No accept attribute keeps the original photo picker; anything non-image (e.g. .pal) opens all files.
+        for (String type : params.getAcceptTypes()) {
+            if (type == null) continue;
+            for (String part : type.split(",")) {
+                String t = part.trim().toLowerCase(Locale.US);
+                if (!t.isEmpty() && !t.startsWith("image/")) return false;
+            }
+        }
+        return true;
+    }
+
     private class WeatherPowerWebViewClient extends WebViewClient {
+        @Override
+        public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+            Uri uri = request.getUrl();
+            if (uri == null || !request.isForMainFrame() || "appassets.androidplatform.net".equals(uri.getHost())) return false;
+            String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(Locale.US);
+            if (!scheme.equals("http") && !scheme.equals("https") && !scheme.equals("mailto") && !scheme.equals("tel")) return true;
+            try {
+                startActivity(new Intent(Intent.ACTION_VIEW, uri));
+                return true;
+            } catch (Exception error) {
+                // Android TV often has no browser; fall back to showing the page in the WebView (Back returns).
+                return false;
+            }
+        }
+
         @Override
         public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
             return assetLoader.shouldInterceptRequest(request.getUrl());

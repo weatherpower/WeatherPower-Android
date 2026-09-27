@@ -36,7 +36,7 @@ android {
         applicationId "co.median.android.pkmqnq"
         minSdk 23
         targetSdk 36
-        versionCode 174
+        versionCode 175
         versionName "1.8.0"
         buildConfigField "String", "WEATHERPOWER_DEV_BUILD", "\"${weatherPowerDevBuild.get()}\""
     }
