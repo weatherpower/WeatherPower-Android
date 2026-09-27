@@ -1,0 +1,18 @@
+<resources>
+    <style name="Theme.WeatherPower" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowActionBar">false</item>
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#047382</item>
+        <item name="android:windowBackground">#030B10</item>
+        <item name="android:navigationBarColor">#030B10</item>
+        <item name="android:statusBarColor">#030B10</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+    <style name="Theme.WeatherPower.WidgetConfig" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#1F2024</item>
+        <item name="android:statusBarColor">#1F2024</item>
+        <item name="android:navigationBarColor">#1F2024</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

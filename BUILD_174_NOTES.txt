@@ -1,0 +1,14 @@
+WeatherPower 1.8.0 — Build 174
+
+Version name: 1.8.0
+Version code: 174
+
+This is the verified Now-page / Shop hotfix source.
+No version-name change was made.
+
+Included fixes:
+- Restored Now-page cards
+- Fixed Now-page render failure
+- Fixed Shop Firebase child/path error
+- Safe per-page rendering isolation
+- WeCall remains excluded

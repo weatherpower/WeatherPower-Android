@@ -1,0 +1,17 @@
+.gradle/
+build/
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+dev-builds/
+dev-center/dist/
+dev-center/node_modules/
+dev-center-data/
+.weatherpower-task.lock
+# Release signing secrets
+keystore.properties
+*.jks
+*.keystore

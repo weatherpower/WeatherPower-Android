@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/widget_forecast_description"
+    android:configure="app.weatherpower.mobile.WidgetConfigActivity"
+    android:initialLayout="@layout/weatherpower_forecast_widget"
+    android:minWidth="180dp"
+    android:minHeight="150dp"
+    android:previewLayout="@layout/weatherpower_forecast_widget"
+    android:resizeMode="horizontal|vertical"
+    android:updatePeriodMillis="1800000"
+    android:widgetCategory="home_screen" />

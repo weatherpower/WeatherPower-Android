@@ -1,0 +1,88 @@
+import java.util.Properties
+import java.io.FileInputStream
+
+plugins {
+    id "com.android.application"
+}
+
+// Release signing is loaded from keystore.properties when you create your upload key.
+// The real keystore and passwords are intentionally not stored in this project zip.
+def keystorePropertiesFile = rootProject.file("keystore.properties")
+def keystoreProperties = new Properties()
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+
+def hasReleaseKeystore = keystorePropertiesFile.exists() &&
+        keystoreProperties["storeFile"] &&
+        keystoreProperties["storePassword"] &&
+        keystoreProperties["keyAlias"] &&
+        keystoreProperties["keyPassword"]
+
+def archivedDevBuilds = rootProject.file("dev-builds").listFiles() ?: []
+def nextArchivedDevBuild = (archivedDevBuilds.collect { file ->
+    def match = file.name =~ /^WeatherPower-DEV-(\d+)-v.*\.apk$/
+    match.matches() ? match.group(1).toInteger() : 0
+}.max() ?: 0) + 1
+def weatherPowerDevBuild = providers.gradleProperty("weatherPowerDevBuild").orElse(String.format("%03d", nextArchivedDevBuild))
+
+android {
+    namespace "app.weatherpower.mobile"
+    compileSdk 36
+
+    defaultConfig {
+        // This matches the current WeatherPower Google Play package name.
+        // Keep this value if you are updating the existing Play Store app.
+        applicationId "co.median.android.pkmqnq"
+        minSdk 23
+        targetSdk 36
+        versionCode 174
+        versionName "1.8.0"
+        buildConfigField "String", "WEATHERPOWER_DEV_BUILD", "\"${weatherPowerDevBuild.get()}\""
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    signingConfigs {
+        release {
+            if (hasReleaseKeystore) {
+                storeFile rootProject.file(keystoreProperties["storeFile"])
+                storePassword keystoreProperties["storePassword"]
+                keyAlias keystoreProperties["keyAlias"]
+                keyPassword keystoreProperties["keyPassword"]
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix ".debug"
+            versionNameSuffix "-debug"
+        }
+        dev {
+            initWith debug
+            applicationIdSuffix ".dev"
+            versionNameSuffix "-dev"
+            matchingFallbacks = ["debug"]
+        }
+        release {
+            minifyEnabled false
+            shrinkResources false
+            if (hasReleaseKeystore) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation "androidx.core:core:1.13.1"
+    implementation "androidx.webkit:webkit:1.12.1"
+}

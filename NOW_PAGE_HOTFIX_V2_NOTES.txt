@@ -1,0 +1,29 @@
+WeatherPower 1.8.0 Now Page Hotfix V2
+
+FIXED
+- Restores the missing legacy Now-page cards without replacing 1.8.0 modules.
+- Fixes Now-page infinite/loading behavior caused by an undefined `risk` variable.
+- Fixes Firebase Shop purchase child/path errors by removing illegal periods from unlock keys.
+- Keeps compatibility with legacy locally-stored Shop unlock keys.
+- Adds safe per-page rendering so one page error cannot stop Radar, Rain, Hourly, Daily, Alerts, More, etc.
+- WeCall is not restored.
+
+RESTORED NOW CARDS
+- Nowcast
+- Humidity
+- UV
+- Pressure
+- Cloud Cover
+- Wind Now
+- Sunrise/Sunset
+- Weather Intelligence
+  - Weather Station
+  - Astronomy
+  - Air Quality
+  - Space Weather
+- Fire Risk Meter
+- Quick Tools
+
+VERSION
+- Version name/code intentionally not changed in this source package.
+- Test before preparing a Play Store hotfix release.

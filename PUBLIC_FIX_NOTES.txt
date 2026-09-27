@@ -1,0 +1,15 @@
+WeatherPower 1.8.0 public fix pass
+
+- Rebased on the original working source to restore Hourly/Daily and all core weather functions.
+- Removed Warning Center from More and removed its native bridge/activity.
+- Removed Experimental Features and Developer Info entries from More.
+- Removed the bottom build/public-release card from More.
+- Changed WeatherPower DEV app label to WeatherPower.
+- Removed dev-build metadata from the Android JS bridge.
+- Reworded visible private-dashboard wording.
+- Expanded Shop 2.0 with real themes and real toggled cosmetics.
+- Theme Vault unlocks all premium Shop themes.
+- Added Sunset Drive and Ice Blue themes.
+- Added functional Radar Plus, Glass Boost, Compact Mode, Header Glow, and Storm Chaser Badge.
+
+Core forecast/radar/hourly/daily functions were preserved from the original source.
