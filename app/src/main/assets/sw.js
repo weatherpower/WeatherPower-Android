@@ -1,4 +1,4 @@
-const CACHE_NAME = "weatherpower-180-code175-radar31-tv-20260927";
+const CACHE_NAME = "weatherpower-180-code175b-radar31-tv-20260927";
 const APP_SHELL = [
   "./manifest.webmanifest",
   "./icon.svg",

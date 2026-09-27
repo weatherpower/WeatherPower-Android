@@ -1,1140 +1,707 @@
-/* WeatherPower Radar 3.1 tools for the Android app.
- * Level III site products (all tilts), MRMS hail/rotation/rain, gas stations, tornado shelters,
- * route weather, point soundings, Model Studio and GR-style palette import.
- * Everything draws on the existing radar MapLibre map (the user's WeatherPower basemap). */
+/* WeatherPower Radar 3.1 tools for the Android app, ported from the Radar 3.1 web blocks:
+ * single-site Level III products at every served tilt, per-product color tables (GR / WxTools palettes),
+ * and MRMS hail / rotation / rainfall layers, all drawn on the existing radar MapLibre map.
+ * Also hosts the "Radar 3.1" bottom sheet that the studio (models, soundings) and travel (gas, shelters,
+ * route) modules add their tabs to. Newest scan only; a radar that isn't sending a product is reported. */
 (function () {
   "use strict";
   const X = window.WPX;
   if (!X) return;
-  const { API, esc, escA, say, getJson, getText, listFrom, pick, num, timeLabel, fc } = X;
+  const { API, esc, escA, say, getJson, getText } = X;
 
-  /* ---------- Settings ---------- */
-  const defaults = {
-    tab: "radar",
-    l3: { on: false, site: "", family: "B", code: "N0B", tilt: 0, pal: "", opacity: 0.8 },
-    mrms: { product: "", window: "" , opacity: 0.8 },
-    gas: false,
-    shelters: false,
-    model: { on: false, model: "hrrr", run: "", field: "", fhr: 0, opacity: 0.7 }
-  };
-  const P = X.prefs.radar31 = Object.assign({}, defaults, X.prefs.radar31 || {});
-  ["l3", "mrms", "model"].forEach(k => { P[k] = Object.assign({}, defaults[k], P[k] || {}); });
-  P.model.on = false; // Model frames are opt-in each session, like the main app's model layer.
-  const palettes = X.prefs.palettes = X.prefs.palettes || {};
+  const P = X.prefs.radar31 = Object.assign({ tab: "radar" }, X.prefs.radar31 || {});
+  P.l3 = Object.assign({ fam: "", tilt: "0", site: "auto", opacity: 0.8 }, P.l3 || {});
+  P.mrms = Object.assign({ product: "", window: "", opacity: 0.85 }, P.mrms || {});
+  if (P.l3.family !== undefined) { // settings written by the first build of this sheet
+    P.l3.fam = P.l3.on ? P.l3.family : "";
+    P.l3.tilt = String(P.l3.tilt || 0);
+    delete P.l3.family; delete P.l3.on; delete P.l3.code; delete P.l3.pal;
+  }
+  if (/^[KPT][A-Z]{3}$/.test(P.l3.site)) P.l3.site = P.l3.site.slice(1);
   const save = () => X.savePrefs();
 
-  /* ---------- Level III products ---------- */
-  const L3_FAMILIES = [
-    { family: "B", label: "Reflectivity", short: "REF", units: "dBZ", tilts: true },
-    { family: "G", label: "Velocity", short: "VEL", units: "kt", tilts: true },
-    { family: "S", label: "Storm-Rel Velocity", short: "SRV", units: "kt", tilts: true },
-    { family: "C", label: "Correlation Coeff", short: "CC", units: "", tilts: true },
-    { family: "X", label: "Diff Reflectivity", short: "ZDR", units: "dB", tilts: true },
-    { family: "K", label: "Specific Diff Phase", short: "KDP", units: "°/km", tilts: true },
-    { family: "EET", label: "Echo Tops", short: "EET", units: "kft", tilts: false },
-    { family: "DVL", label: "Digital VIL", short: "DVL", units: "kg/m²", tilts: false }
-  ];
-  const TILTS = ["Tilt 1 · 0.5°", "Tilt 2", "Tilt 3", "Tilt 4"];
-  let serverProducts = null; // extra products advertised by /api/radar/products
-  let serverSites = null;
-  const l3Latest = { key: "", time: "", tiles: "", fetchedAt: 0, error: "", for: "" };
-
-  function familyInfo(family) {
-    return L3_FAMILIES.find(f => f.family === family) || (serverProducts || []).find(p => p.family === family) || L3_FAMILIES[0];
-  }
-
-  function l3Code(family = P.l3.family, tilt = P.l3.tilt) {
-    const info = familyInfo(family);
-    return info.tilts ? `N${Math.max(0, Math.min(3, Number(tilt) || 0))}${family}` : (info.code || family);
-  }
-
-  async function loadServerProducts() {
-    if (serverProducts) return serverProducts;
-    try {
-      const list = listFrom(await getJson(API.radarProducts(), { label: "Radar products" }), ["products"]);
-      const known = new Set(L3_FAMILIES.map(f => f.family));
-      serverProducts = [];
-      list.forEach(item => {
-        const code = String(typeof item === "string" ? item : pick(item, ["code", "product", "id", "name"], "")).toUpperCase();
-        const label = typeof item === "string" ? item : pick(item, ["label", "title", "description", "name"], code);
-        const tilt = code.match(/^N([0-3])([A-Z])$/);
-        const family = tilt ? tilt[2] : code;
-        if (!family || known.has(family)) return;
-        known.add(family);
-        serverProducts.push({ family, code, label: String(label), short: code, units: String(pick(item, ["units", "unit"], "")), tilts: !!tilt });
-      });
-    } catch (error) {
-      serverProducts = [];
-      console.warn("Radar products list unavailable", error);
-    }
-    return serverProducts;
-  }
-
-  function icaoFor(id) {
-    const raw = String(id || "").trim().toUpperCase();
-    if (/^[A-Z]{4}$/.test(raw)) return raw;
-    if (["GUA", "HKI", "HKM", "HMO", "HWA", "ABC", "ACG", "AEC", "AHG", "AIH", "AKC", "APD"].includes(raw)) return `P${raw}`;
-    if (raw === "JUA") return "TJUA";
-    return raw ? `K${raw}` : "";
-  }
-
-  async function loadSites() {
-    if (serverSites) return serverSites;
-    try {
-      const list = listFrom(await getJson(API.radarSites(), { label: "Radar sites" }), ["sites"]);
-      serverSites = list.map(item => {
-        const props = item.properties || item;
-        const coords = item.geometry?.coordinates;
-        return {
-          id: icaoFor(pick(props, ["icao", "id", "site", "code", "name"], "")),
-          name: String(pick(props, ["name", "city", "location", "description"], "")),
-          lat: num(pick(props, ["lat", "latitude"], coords ? coords[1] : null)),
-          lon: num(pick(props, ["lon", "lng", "longitude"], coords ? coords[0] : null))
-        };
-      }).filter(s => s.id && s.lat !== null && s.lon !== null);
-    } catch (error) {
-      console.warn("Radar site list unavailable, using built-in NEXRAD list", error);
-      serverSites = [];
-    }
-    if (!serverSites.length && typeof RADAR_FALLBACK_SITES !== "undefined") {
-      serverSites = RADAR_FALLBACK_SITES.map(([id, lat, lon]) => ({ id: icaoFor(id), name: "", lat, lon }));
-    }
-    return serverSites;
-  }
-
-  function mapCenter() {
-    try {
-      if (radarMap) { const c = radarMap.getCenter(); return { latitude: c.lat, longitude: c.lng }; }
-    } catch (_) {}
-    return { latitude: state.location.latitude, longitude: state.location.longitude };
-  }
-
-  function sitesByDistance(center = mapCenter()) {
-    return (serverSites || []).map(s => Object.assign({ miles: X.haversineMiles([center.longitude, center.latitude], [s.lon, s.lat]) }, s))
-      .sort((a, b) => a.miles - b.miles);
-  }
-
-  function currentSite() {
-    if (P.l3.site) return P.l3.site;
-    try { return icaoFor(currentVelocityRadarSite()); } catch (_) { return "KTLX"; }
-  }
-
-  function paletteParam() {
-    const pal = P.l3.pal && palettes[P.l3.pal];
-    return pal ? encodePalette(pal.text) : "";
-  }
-
-  async function refreshL3Latest(force) {
-    const site = currentSite();
-    const code = l3Code();
-    const want = `${site}/${code}/${P.l3.pal}`;
-    if (!force && l3Latest.for === want && Date.now() - l3Latest.fetchedAt < 120000) return l3Latest;
-    l3Latest.for = want;
-    l3Latest.fetchedAt = Date.now();
-    try {
-      const json = await getJson(API.radarLatest(site, code), { label: "Latest radar scan" });
-      if (json && json.error) throw new Error(json.error);
-      const key = String(pick(json, ["key", "id", "scan_key", "file", "name"], ""));
-      const template = pick(json, ["tiles", "tile_url", "tileUrl", "template"], "");
-      l3Latest.key = key;
-      l3Latest.time = pick(json, ["time", "valid", "valid_time", "validTime", "scan_time", "timestamp", "datetime", "vol_time"], "");
-      l3Latest.tiles = Array.isArray(template) ? template[0] : (template || "");
-      l3Latest.error = "";
-    } catch (error) {
-      // /live always serves the newest scan, so the layer still works without /latest metadata.
-      l3Latest.key = "";
-      l3Latest.time = "";
-      l3Latest.tiles = "";
-      l3Latest.error = String(error.message || error);
-    }
-    return l3Latest;
-  }
-
-  function withPal(url, pal) {
-    if (!pal || /[?&]pal=/.test(url)) return url;
-    return `${url}${url.includes("?") ? "&" : "?"}pal=${encodeURIComponent(pal)}`;
-  }
-
-  function l3TileTemplate(site = currentSite(), code = l3Code(), pal = paletteParam()) {
-    if (l3Latest.for.startsWith(`${site}/${code}/`)) {
-      if (l3Latest.tiles) return withPal(absolute(l3Latest.tiles), pal);
-      if (l3Latest.key) return API.radarTile(l3Latest.key, pal);
-    }
-    const bucket = Math.floor(Date.now() / 120000);
-    const live = API.radarLive(site, code, pal);
-    return `${live}${live.includes("?") ? "&" : "?"}v=${bucket}`;
-  }
-
-  function absolute(url) {
-    if (/^https?:/i.test(url)) return url;
-    return `${API.render}${url.startsWith("/") ? "" : "/"}${url}`;
-  }
-
-  /* ---------- Palette import (GR / RadarScope .pal) ---------- */
-  function parsePalette(text) {
-    const lines = String(text || "").split(/\r?\n/);
-    const out = { product: "", units: "", scale: 1, stops: [] };
-    lines.forEach(line => {
-      const clean = line.replace(/;.*$/, "").trim();
-      if (!clean) return;
-      const m = clean.match(/^([A-Za-z0-9]+)\s*:\s*(.*)$/);
-      if (!m) return;
-      const key = m[1].toLowerCase();
-      const value = m[2].trim();
-      if (key === "product") out.product = value;
-      else if (key === "units") out.units = value;
-      else if (key === "scale") out.scale = Number(value) || 1;
-      else if (key === "color" || key === "color4" || key === "solidcolor" || key === "solidcolor4") {
-        const parts = value.split(/\s+/).map(Number);
-        if (parts.length >= 4 && parts.every(Number.isFinite)) {
-          const [v, r, g, b] = parts;
-          out.stops.push({ value: v, color: `rgb(${r},${g},${b})` });
-        }
-      }
-    });
-    if (out.stops.length < 2) throw new Error("No Color: lines found. Use a GR2/GR Level 3 or RadarScope .pal file.");
-    out.stops.sort((a, b) => a.value - b.value);
-    return out;
-  }
-
-  function encodePalette(text) {
-    // The render service takes the palette itself; send the .pal body without comments, base64url encoded.
-    const compact = String(text || "").split(/\r?\n/).map(l => l.replace(/;.*$/, "").trim()).filter(Boolean).join("\n");
-    try {
-      return btoa(unescape(encodeURIComponent(compact))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-    } catch (_) {
-      return "";
-    }
-  }
-
-  function paletteBar(stops) {
-    if (!stops || !stops.length) return "";
-    const min = stops[0].value, max = stops[stops.length - 1].value, span = (max - min) || 1;
-    const grad = stops.map(s => `${s.color} ${(((s.value - min) / span) * 100).toFixed(1)}%`).join(",");
-    return `<div class="wpx-palbar" style="background:linear-gradient(90deg,${grad})"></div><div class="wpx-palscale"><span>${esc(min)}</span><span>${esc(max)}</span></div>`;
-  }
-
-  function importPaletteFile(file) {
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const text = String(reader.result || "");
-        const parsed = parsePalette(text);
-        const name = (file.name || "Custom palette").replace(/\.[^.]+$/, "").slice(0, 40);
-        const id = `pal_${Date.now().toString(36)}`;
-        palettes[id] = { name, text, product: parsed.product, units: parsed.units, stops: parsed.stops.slice(0, 64), family: P.l3.family };
-        P.l3.pal = id;
-        save();
-        say(`Palette “${name}” imported`);
-        applyAll(true);
-        renderSheet();
-      } catch (error) {
-        say(error.message || "That palette could not be read.");
-      }
-    };
-    reader.onerror = () => say("That file could not be opened.");
-    reader.readAsText(file);
-  }
-
-  /* ---------- MRMS ---------- */
-  const MRMS_PRODUCTS = [
-    { id: "hail", label: "Hail (MESH)", units: "in", windows: [30, 60, 120, 360, 1440] },
-    { id: "rotation", label: "Rotation 0–2 km", units: "s⁻¹", windows: [30, 60, 120, 360, 1440] },
-    { id: "rotation_mid", label: "Rotation 3–6 km", units: "s⁻¹", windows: [30, 60, 120, 360, 1440] },
-    { id: "rain", label: "Rainfall (QPE)", units: "in", windows: [60, 180, 360, 720, 1440] }
-  ];
-  const mrmsLatest = { key: "", time: "", tiles: "", for: "", fetchedAt: 0, error: "" };
-  let mrmsServerLoaded = false;
-
-  async function loadMrmsProducts() {
-    if (mrmsServerLoaded) return;
-    mrmsServerLoaded = true;
-    try {
-      const list = listFrom(await getJson(API.mrmsProducts(), { label: "MRMS products" }), ["products"]);
-      list.forEach(item => {
-        const id = String(typeof item === "string" ? item : pick(item, ["id", "product", "key", "name"], ""));
-        const known = MRMS_PRODUCTS.find(p => p.id === id);
-        const windows = Array.isArray(item?.windows) ? item.windows : null;
-        if (known && windows && windows.length) known.windows = windows;
-        if (known && item?.label) known.label = String(item.label);
-      });
-    } catch (error) { console.warn("MRMS product list unavailable", error); }
-  }
-
-  function windowLabel(value) {
-    const n = Number(value);
-    if (!Number.isFinite(n)) return String(value);
-    return n >= 60 ? `${n / 60}h` : `${n}m`;
-  }
-
-  async function refreshMrmsLatest(force) {
-    if (!P.mrms.product) return mrmsLatest;
-    const want = `${P.mrms.product}/${P.mrms.window}`;
-    if (!force && mrmsLatest.for === want && Date.now() - mrmsLatest.fetchedAt < 120000) return mrmsLatest;
-    mrmsLatest.for = want;
-    mrmsLatest.fetchedAt = Date.now();
-    try {
-      const json = await getJson(API.mrmsLatest(P.mrms.product, P.mrms.window), { label: "MRMS latest" });
-      if (json && json.error) throw new Error(json.error);
-      mrmsLatest.key = String(pick(json, ["key", "id", "file", "name"], ""));
-      const template = pick(json, ["tiles", "tile_url", "tileUrl", "template"], "");
-      mrmsLatest.tiles = Array.isArray(template) ? template[0] : (template || "");
-      mrmsLatest.time = pick(json, ["time", "valid", "valid_time", "validTime", "timestamp", "datetime"], "");
-      mrmsLatest.error = mrmsLatest.key || mrmsLatest.tiles ? "" : "No MRMS scan is available right now.";
-    } catch (error) {
-      mrmsLatest.key = "";
-      mrmsLatest.tiles = "";
-      mrmsLatest.error = String(error.message || error);
-    }
-    return mrmsLatest;
-  }
-
-  function mrmsTemplate() {
-    if (mrmsLatest.tiles) return absolute(mrmsLatest.tiles);
-    if (mrmsLatest.key) return API.mrmsTile(mrmsLatest.key);
-    return "";
-  }
-
-  /* ---------- Gas stations + EIA prices ---------- */
-  const gas = { features: null, loading: false, error: "", eia: null, status: null, tiles: new Set(), rev: 0 };
-
-  function extractJson(text) {
-    const body = String(text || "").trim();
-    try { return JSON.parse(body); } catch (_) {}
-    const starts = [body.indexOf("["), body.indexOf("{")].filter(i => i >= 0);
-    if (!starts.length) throw new Error("No data in gas feed");
-    const start = Math.min(...starts);
-    const end = Math.max(body.lastIndexOf("]"), body.lastIndexOf("}"));
-    return JSON.parse(body.slice(start, end + 1));
-  }
-
-  function gasFeatures(json) {
-    if (json && json.type === "FeatureCollection") return json.features || [];
-    const list = listFrom(json, ["stations", "dots", "d", "s"]);
-    return list.map(item => {
-      let lat, lon, price, name = "", brand = "", updated = "";
-      if (Array.isArray(item)) {
-        lat = num(item[0]); lon = num(item[1]); price = num(item[2]);
-        name = typeof item[3] === "string" ? item[3] : "";
-      } else if (item && typeof item === "object") {
-        lat = num(pick(item, ["lat", "latitude", "y", "la"]));
-        lon = num(pick(item, ["lon", "lng", "longitude", "x", "lo"]));
-        price = num(pick(item, ["price", "regular", "reg", "p", "r", "gas"]));
-        name = String(pick(item, ["name", "n", "station", "title"], ""));
-        brand = String(pick(item, ["brand", "b"], ""));
-        updated = pick(item, ["updated", "time", "t", "ts"], "");
-      }
-      if (lat === null || lon === null || Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
-      return { type: "Feature", geometry: { type: "Point", coordinates: [lon, lat] }, properties: { name: name || brand || "Gas station", brand, price, updated: updated ? String(updated) : "" } };
-    }).filter(Boolean);
-  }
-
-  async function loadGas() {
-    if (gas.loading || gas.features) return;
-    gas.loading = true;
-    gas.error = "";
-    try {
-      gas.features = gasFeatures(extractJson(await getText(API.gasDots(), { label: "Gas stations" })));
-    } catch (error) {
-      gas.features = [];
-      gas.error = `Gas stations unavailable: ${error.message || error}`;
-    }
-    gas.rev++;
-    gas.loading = false;
-    loadGasPrices();
-    applyAll();
-    if (isSheetOpen() && P.tab === "map") renderSheet();
-  }
-
-  async function loadGasTileAroundCenter() {
-    if (!P.gas || !radarMap || radarMap.getZoom() < 9) return;
-    const c = radarMap.getCenter();
-    const key = `${Math.floor(c.lat)}_${Math.floor(c.lng)}`;
-    if (gas.tiles.has(key)) return;
-    gas.tiles.add(key);
-    try {
-      const extra = gasFeatures(extractJson(await getText(API.gasTile(Math.floor(c.lat), Math.floor(c.lng)), { label: "Gas tile" })));
-      if (extra.length) {
-        const seen = new Set((gas.features || []).map(f => f.geometry.coordinates.join(",")));
-        gas.features = (gas.features || []).concat(extra.filter(f => !seen.has(f.geometry.coordinates.join(","))));
-        gas.rev++;
-        applyAll();
-      }
-    } catch (error) { console.warn("Gas detail tile unavailable", key, error); }
-  }
-
-  async function loadGasPrices() {
-    if (gas.eia) return;
-    gas.eia = { loading: true, rows: [] };
-    try {
-      const json = await getJson(API.eiaGas(), { label: "EIA gas prices" });
-      const rows = json?.response?.data || [];
-      const latest = {};
-      rows.forEach(row => { if (!latest[row.duoarea]) latest[row.duoarea] = row; });
-      gas.eia = { loading: false, rows: Object.values(latest), period: rows[0]?.period || "" };
-    } catch (error) {
-      gas.eia = { loading: false, rows: [], error: String(error.message || error) };
-    }
-    try { gas.status = await getJson(API.gasStatus(), { label: "Gas status" }); } catch (_) { gas.status = null; }
-    if (isSheetOpen() && P.tab === "map") renderSheet();
-  }
-
-  /* ---------- Tornado shelters ---------- */
-  const shelters = { features: null, loading: false, error: "", rev: 0 };
-
-  async function loadShelters() {
-    if (shelters.loading || shelters.features) return;
-    shelters.loading = true;
-    try {
-      const json = await getJson(API.shelters(), { label: "Tornado shelters" });
-      if (json && json.type === "FeatureCollection") shelters.features = json.features || [];
-      else {
-        shelters.features = listFrom(json, ["shelters"]).map(item => {
-          const lat = num(pick(item, ["lat", "latitude"])), lon = num(pick(item, ["lon", "lng", "longitude"]));
-          if (lat === null || lon === null) return null;
-          return { type: "Feature", geometry: { type: "Point", coordinates: [lon, lat] }, properties: Object.assign({}, item) };
-        }).filter(Boolean);
-      }
-    } catch (error) {
-      shelters.features = [];
-      shelters.error = `Shelter list unavailable: ${error.message || error}`;
-    }
-    shelters.rev++;
-    shelters.loading = false;
-    applyAll();
-    if (isSheetOpen() && P.tab === "map") renderSheet();
-  }
-
-  /* ---------- Route weather ---------- */
-  const route = { from: null, to: null, results: null, geometry: null, loading: false, error: "", depart: 0, fromResults: [], toResults: [], straight: false, rev: 0 };
-
-  async function geocode(query) {
-    if (typeof searchLocationsRaw === "function") return searchLocationsRaw(query, 5);
-    return [];
-  }
-
-  async function runRoute() {
-    const from = route.from || { name: state.location.name, latitude: state.location.latitude, longitude: state.location.longitude };
-    const to = route.to;
-    if (!to) { say("Pick a destination first."); return; }
-    route.loading = true;
-    route.error = "";
-    route.results = null;
-    renderSheet();
-    try {
-      let coords, durationSec;
-      route.straight = false;
-      try {
-        const json = await getJson(API.osrmRoute(from, to), { label: "Route" });
-        const best = json?.routes?.[0];
-        if (!best) throw new Error("No drivable route found");
-        coords = best.geometry.coordinates;
-        durationSec = best.duration;
-      } catch (routeError) {
-        // Routing server down: fall back to the direct line, clearly labeled, at a 55 mph average.
-        route.straight = true;
-        coords = [[from.longitude, from.latitude], [to.longitude, to.latitude]];
-        durationSec = X.haversineMiles(coords[0], coords[1]) / 55 * 3600;
-      }
-      route.geometry = coords;
-      const cum = [0];
-      for (let i = 1; i < coords.length; i++) cum.push(cum[i - 1] + X.haversineMiles(coords[i - 1], coords[i]));
-      const total = cum[cum.length - 1] || 0.001;
-      const samples = Math.max(2, Math.min(10, Math.ceil(total / 45) + 1));
-      const departMs = Date.now() + Number(route.depart || 0) * 3600000;
-      const points = [];
-      for (let s = 0; s < samples; s++) {
-        const target = total * s / (samples - 1);
-        let i = cum.findIndex(d => d >= target);
-        if (i <= 0) i = Math.max(1, i);
-        const seg = cum[i] - cum[i - 1] || 1;
-        const t = Math.max(0, Math.min(1, (target - cum[i - 1]) / seg));
-        const a = coords[i - 1], b = coords[i] || a;
-        points.push({ lon: a[0] + (b[0] - a[0]) * t, lat: a[1] + (b[1] - a[1]) * t, miles: target, eta: departMs + durationSec * 1000 * (target / total) });
-      }
-      route.results = await Promise.all(points.map(routePointWeather));
-      route.summary = { miles: total, hours: durationSec / 3600, from: from.name, to: to.name };
-    } catch (error) {
-      route.error = String(error.message || error);
-    }
-    route.loading = false;
-    route.rev++;
-    applyAll();
-    fitRoute();
-    renderSheet();
-  }
-
-  async function routePointWeather(point) {
-    const out = Object.assign({}, point, { forecast: null, alerts: [], place: "", error: "" });
-    try {
-      const meta = await getJson(API.nwsPoint(point.lat, point.lon), { label: "NWS point", headers: X.NWS.headers });
-      const rel = meta?.properties?.relativeLocation?.properties;
-      out.place = rel ? `${rel.city}, ${rel.state}` : "";
-      const hourlyUrl = meta?.properties?.forecastHourly;
-      if (hourlyUrl) {
-        const hourly = await getJson(hourlyUrl, { label: "NWS hourly", headers: X.NWS.headers });
-        const periods = hourly?.properties?.periods || [];
-        out.forecast = periods.find(p => new Date(p.startTime).getTime() <= point.eta && new Date(p.endTime).getTime() > point.eta) || periods[0] || null;
-      }
-    } catch (error) {
-      out.error = "No NWS forecast here (outside the US or service busy).";
-    }
-    try {
-      const alerts = await getJson(API.nwsAlertsPoint(point.lat, point.lon), { label: "NWS alerts", headers: X.NWS.headers });
-      out.alerts = (alerts?.features || []).map(f => f.properties?.event).filter(Boolean);
-    } catch (_) {}
-    return out;
-  }
-
-  function routeFeatureCollection() {
-    if (!route.geometry) return fc([]);
-    const features = [{ type: "Feature", geometry: { type: "LineString", coordinates: route.geometry }, properties: { kind: "line" } }];
-    (route.results || []).forEach((p, i) => {
-      const wet = /rain|storm|shower|snow|sleet|ice|drizzle/i.test(p.forecast?.shortForecast || "");
-      features.push({ type: "Feature", geometry: { type: "Point", coordinates: [p.lon, p.lat] }, properties: { kind: "point", idx: i, color: p.alerts.length ? "#ff4d4d" : wet ? "#4fb3ff" : "#5ee7a0", label: p.forecast ? `${p.forecast.temperature}°` : "" } });
-    });
-    return fc(features);
-  }
-
-  function fitRoute() {
-    if (!radarMap || !route.geometry || route.geometry.length < 2) return;
-    const lons = route.geometry.map(c => c[0]), lats = route.geometry.map(c => c[1]);
-    try { radarMap.fitBounds([[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]], { padding: 60, maxZoom: 9, duration: 600 }); } catch (_) {}
-  }
-
-  /* ---------- Model Studio ---------- */
-  const MODELS = [
-    { id: "hrrr", label: "HRRR" },
-    { id: "nam", label: "NAM" },
-    { id: "gfs", label: "GFS" },
-    { id: "ecmwf", label: "ECMWF" }
-  ];
-  const FALLBACK_FIELDS = [
-    { id: "refc", label: "Composite reflectivity" },
-    { id: "t2m", label: "2 m temperature" },
-    { id: "d2m", label: "2 m dew point" },
-    { id: "gust", label: "Wind gust" },
-    { id: "cape", label: "CAPE" },
-    { id: "apcp", label: "Total precipitation" }
-  ];
-  const studio = { runs: {}, hours: {}, fields: {}, frame: null, loading: false, error: "", playing: false, timer: 0, probe: null };
-
-  function runId(item) {
-    return String(typeof item === "string" || typeof item === "number" ? item : pick(item, ["run", "id", "init", "cycle", "name", "time"], ""));
-  }
-
-  function fieldsFrom(json) {
-    const raw = json && !Array.isArray(json) ? pick(json, ["fields", "params", "parameters", "variables", "products", "layers"], null) : null;
-    if (!Array.isArray(raw) || !raw.length) return null;
-    return raw.map(f => typeof f === "string" ? { id: f, label: f } : { id: String(pick(f, ["id", "key", "name", "field"], "")), label: String(pick(f, ["label", "title", "name", "id"], "")) }).filter(f => f.id);
-  }
-
-  async function loadRuns(model = P.model.model) {
-    if (studio.runs[model]) return studio.runs[model];
-    studio.loading = true;
-    studio.error = "";
-    try {
-      const json = await getJson(API.modelRuns(model), { label: "Model runs" });
-      const runs = listFrom(json, ["runs", "cycles"]).map(item => ({ id: runId(item), raw: item })).filter(r => r.id);
-      studio.runs[model] = runs;
-      studio.fields[model] = fieldsFrom(json) || fieldsFrom(runs[0]?.raw) || FALLBACK_FIELDS;
-      if (!runs.length) studio.error = `No ${model.toUpperCase()} runs are published yet.`;
-    } catch (error) {
-      studio.runs[model] = [];
-      studio.fields[model] = FALLBACK_FIELDS;
-      studio.error = `Model runs unavailable: ${error.message || error}`;
-    }
-    studio.loading = false;
-    if (!studio.runs[model].some(r => r.id === P.model.run)) P.model.run = studio.runs[model][0]?.id || "";
-    if (!studio.fields[model].some(f => f.id === P.model.field)) P.model.field = studio.fields[model][0]?.id || "";
-    save();
-    return studio.runs[model];
-  }
-
-  async function loadHours() {
-    const model = P.model.model, run = P.model.run;
-    if (!run) return [];
-    const key = `${model}/${run}`;
-    if (studio.hours[key]) return studio.hours[key];
-    let hours = null;
-    const runInfo = (studio.runs[model] || []).find(r => r.id === run)?.raw;
-    if (runInfo && Array.isArray(runInfo.hours)) hours = runInfo.hours;
-    if (!hours) {
-      try {
-        const json = await getJson(API.modelHours(model, run), { label: "Model hours" });
-        hours = listFrom(json, ["hours", "fhrs", "forecast_hours"]);
-        const fields = fieldsFrom(json);
-        if (fields) studio.fields[model] = fields;
-      } catch (error) {
-        studio.error = `Forecast hours unavailable: ${error.message || error}`;
-        hours = [];
-      }
-    }
-    studio.hours[key] = hours.map(h => Number(typeof h === "object" ? pick(h, ["fhr", "hour", "h"], 0) : h)).filter(Number.isFinite).sort((a, b) => a - b);
-    if (!studio.hours[key].includes(Number(P.model.fhr))) P.model.fhr = studio.hours[key][0] ?? 0;
-    return studio.hours[key];
-  }
-
-  async function fetchFrameSpec(model, run, field, fhr) {
-    const url = API.modelFrame(model, run, field, fhr);
-    try {
-      const json = await getJson(url, { label: "Model frame" });
-      const template = pick(json, ["tiles", "tile_url", "tileUrl", "template"], "");
-      const image = pick(json, ["image", "url", "png", "src"], "");
-      const bounds = pick(json, ["bounds", "bbox", "extent"], null);
-      const valid = pick(json, ["valid", "valid_time", "validTime", "time"], "");
-      if (template) return { kind: "tiles", url: absolute(Array.isArray(template) ? template[0] : template), valid };
-      if (image && normalizeBounds(bounds)) return { kind: "image", url: absolute(image), bounds: normalizeBounds(bounds), valid };
-    } catch (_) {
-      // Not JSON: the frame endpoint serves imagery directly.
-    }
-    return { kind: "tiles", url: `${url}/{z}/{x}/{y}.png`, valid: "" };
-  }
-
-  async function loadFrame() {
-    const { model, run, field, fhr } = P.model;
-    if (!run || !field) return;
-    const want = `${model}/${run}/${field}/${fhr}`;
-    studio.frameFor = want;
-    const frame = await fetchFrameSpec(model, run, field, fhr);
-    if (studio.frameFor !== want) return;
-    studio.frame = frame;
-    applyAll();
-    syncStudioChrome();
-  }
-
-  function normalizeBounds(b) {
-    if (Array.isArray(b) && b.length === 4 && b.every(v => Number.isFinite(Number(v)))) {
-      const [w, s, e, n] = b.map(Number);
-      return [[w, n], [e, n], [e, s], [w, s]];
-    }
-    if (b && typeof b === "object") {
-      const w = num(pick(b, ["west", "minx", "xmin", "left"])), s = num(pick(b, ["south", "miny", "ymin", "bottom"]));
-      const e = num(pick(b, ["east", "maxx", "xmax", "right"])), n = num(pick(b, ["north", "maxy", "ymax", "top"]));
-      if ([w, s, e, n].every(v => v !== null)) return [[w, n], [e, n], [e, s], [w, s]];
-    }
-    return null;
-  }
-
-  function stepModel(delta) {
-    const hours = studio.hours[`${P.model.model}/${P.model.run}`] || [];
-    if (!hours.length) return;
-    let i = hours.indexOf(Number(P.model.fhr));
-    i = (i + delta + hours.length) % hours.length;
-    P.model.fhr = hours[i];
-    save();
-    loadFrame();
-  }
-
-  function setStudioPlaying(play) {
-    studio.playing = !!play;
-    clearInterval(studio.timer);
-    if (studio.playing) studio.timer = setInterval(() => stepModel(1), 1200);
-    syncStudioChrome();
-  }
-
-  function syncStudioChrome() {
-    const label = document.getElementById("wpxModelHour");
-    if (label) label.textContent = `F${String(P.model.fhr).padStart(2, "0")}${studio.frame?.valid ? ` · valid ${timeLabel(studio.frame.valid)}` : ""}`;
-    const slider = document.getElementById("wpxModelSlider");
-    const hours = studio.hours[`${P.model.model}/${P.model.run}`] || [];
-    if (slider) slider.value = String(Math.max(0, hours.indexOf(Number(P.model.fhr))));
-    const play = document.querySelector('[data-wpx="studioPlay"]');
-    if (play) play.textContent = studio.playing ? "Pause" : "Play";
-  }
-
-  async function openStudio() {
-    P.model.on = true;
-    save();
-    await loadRuns();
-    await loadHours();
-    renderSheet();
-    loadFrame();
-  }
-
-  /* ---------- Soundings ---------- */
-  let soundingArmed = false;
-
-  function openSounding(lat, lon) {
-    soundingArmed = false;
-    const body = X.openOverlay({ id: "sounding", title: `Sounding · ${lat.toFixed(2)}, ${lon.toFixed(2)}`, className: "wpx-sounding" });
-    const s = { fhr: 0, data: null, error: "" };
-    const draw = () => {
-      const rows = soundingRows(s.data, s.fhr);
-      body.innerHTML = `
-        <div class="wpx-card">
-          <div class="wpx-row"><strong>HRRR forecast hour</strong><span id="wpxSndHour">F${String(s.fhr).padStart(2, "0")}</span></div>
-          <input type="range" min="0" max="18" value="${s.fhr}" id="wpxSndSlider" aria-label="Forecast hour">
-          <div class="wpx-btnrow"><button class="wpx-btn" data-wpx="sndStep" data-d="-1">‹ Hour</button><button class="wpx-btn" data-wpx="sndStep" data-d="1">Hour ›</button></div>
-        </div>
-        <div class="wpx-card wpx-snd-img"><img alt="Skew-T sounding" src="${escA(API.soundingImage(lat.toFixed(3), lon.toFixed(3), s.fhr))}" onerror="this.replaceWith(Object.assign(document.createElement('p'),{className:'wpx-note',textContent:'Sounding image is not available for this point/hour.'}))"></div>
-        <div class="wpx-card"><h3>Parameters</h3>${s.error ? `<p class="wpx-note">${esc(s.error)}</p>` : !s.data ? `<p class="wpx-note">Loading sounding data…</p>` : rows.length ? `<div class="wpx-kv">${rows.map(([k, v]) => `<div><small>${esc(k)}</small><strong>${esc(v)}</strong></div>`).join("")}</div>` : `<p class="wpx-note">No parameter values were returned for this hour.</p>`}</div>`;
-    };
-    X.actions.sndStep = el => { s.fhr = Math.max(0, Math.min(18, s.fhr + Number(el.dataset.d))); draw(); };
-    body.addEventListener("change", e => { if (e.target.id === "wpxSndSlider") { s.fhr = Number(e.target.value); draw(); } });
-    draw();
-    getJson(API.soundingJson(lat.toFixed(3), lon.toFixed(3), "hrrr", 19), { label: "Sounding", timeoutMs: 25000 })
-      .then(json => { s.data = json; draw(); })
-      .catch(error => { s.error = `Sounding data unavailable: ${error.message || error}`; draw(); });
-  }
-
-  const SND_LABELS = { sbcape: "SBCAPE", mlcape: "MLCAPE", mucape: "MUCAPE", sbcin: "SBCIN", mlcin: "MLCIN", cape: "CAPE", cin: "CIN", lcl: "LCL", lfc: "LFC", el: "EL", srh01: "0–1 km SRH", srh03: "0–3 km SRH", shear06: "0–6 km shear", bwd06: "0–6 km shear", pwat: "PWAT", li: "Lifted index", stp: "STP", scp: "SCP", lr75: "700–500 lapse", lapse: "Lapse rate", t2m: "Temp", td2m: "Dew point", temp: "Temp", dewp: "Dew point" };
-
-  function soundingRows(data, fhr) {
-    if (!data) return [];
-    let hour = data;
-    const list = listFrom(data, ["hours", "forecast", "profiles", "soundings", "data"]);
-    if (list.length && typeof list[0] === "object") {
-      hour = list.find(h => Number(pick(h, ["fhr", "hour", "f", "h"], -1)) === Number(fhr)) || list[Math.min(list.length - 1, fhr)] || list[0];
-    }
-    const params = hour.params || hour.indices || hour.parameters || hour;
-    const rows = [];
-    Object.entries(params || {}).forEach(([k, v]) => {
-      if (typeof v === "number" && Number.isFinite(v)) rows.push([SND_LABELS[k.toLowerCase()] || k, Math.abs(v) >= 100 ? Math.round(v) : Math.round(v * 10) / 10]);
-      else if (v && typeof v === "object" && Number.isFinite(v.value)) rows.push([SND_LABELS[k.toLowerCase()] || k, `${Math.round(v.value * 10) / 10}${v.units ? ` ${v.units}` : ""}`]);
-    });
-    return rows.filter(([k]) => !/^(lat|lon|fhr|hour|f|h)$/i.test(k)).slice(0, 24);
-  }
-
-  /* ---------- Map layers ---------- */
-  function applyAll(forceLatest) {
-    const map = radarMap;
-    if (!X.mapReady(map)) return;
-    bindMap(map);
-    const before = typeof rasterLayerBeforeId === "function" ? rasterLayerBeforeId("wp-nexrad-layer") : undefined;
-
-    // Level III site product replaces the mosaic while on.
-    if (P.l3.on) {
-      if (forceLatest || !l3Latest.for.startsWith(`${currentSite()}/${l3Code()}/`)) {
-        refreshL3Latest(forceLatest).then(() => { setL3(map, before); syncSheetStatus(); });
-      }
-      setL3(map, before);
-      try { if (map.getLayer("wp-nexrad-layer")) map.setLayoutProperty("wp-nexrad-layer", "visibility", "none"); } catch (_) {}
-    } else {
-      X.removeLayerAndSource(map, "wpx-l3");
-      try { if (map.getLayer("wp-nexrad-layer")) map.setLayoutProperty("wp-nexrad-layer", "visibility", "visible"); } catch (_) {}
-    }
-
-    if (P.mrms.product) {
-      if (forceLatest || mrmsLatest.for !== `${P.mrms.product}/${P.mrms.window}`) refreshMrmsLatest(forceLatest).then(() => { setMrms(map, before); syncSheetStatus(); });
-      setMrms(map, before);
-    } else X.removeLayerAndSource(map, "wpx-mrms");
-
-    if (P.model.on && studio.frame) setModelFrame(map, before);
-    else X.removeLayerAndSource(map, "wpx-model");
-
-    setPoints(map, "wpx-gas", P.gas ? fc(gas.features || []) : fc([]), "#ffb020", `${P.gas}:${gas.rev}`);
-    setPoints(map, "wpx-shelters", P.shelters ? fc(shelters.features || []) : fc([]), "#b56cff", `${P.shelters}:${shelters.rev}`);
-    setRoute(map);
-  }
-
-  function setL3(map, before) {
-    if (!P.l3.on) return;
-    X.setRaster(map, "wpx-l3", [l3TileTemplate()], { opacity: P.l3.opacity, beforeId: before, maxzoom: 14, attribution: "NEXRAD Level III: NOAA/NWS · WeatherPower render" });
-  }
-
-  function setMrms(map, before) {
-    const tiles = mrmsTemplate();
-    if (!tiles) { X.removeLayerAndSource(map, "wpx-mrms"); return; }
-    X.setRaster(map, "wpx-mrms", [tiles], { opacity: P.mrms.opacity, beforeId: before, maxzoom: 12, attribution: "MRMS: NOAA/NSSL" });
-  }
-
-  function setModelFrame(map, before) {
-    drawFrame(map, studio.frame, P.model.opacity, before);
-  }
-
-  function drawFrame(map, f, opacity, before) {
-    if (!f) return;
-    if (f.kind === "tiles") {
-      X.removeLayerAndSource(map, "wpx-model-img");
-      X.setRaster(map, "wpx-model", [f.url], { opacity, beforeId: before, resampling: "linear", attribution: "Model data: NOAA/NCEP · ECMWF open data" });
-    } else if (f.kind === "image" && f.bounds) {
-      X.removeLayerAndSource(map, "wpx-model");
-      const src = map.getSource("wpx-model-img");
-      try {
-        if (src && src.updateImage) src.updateImage({ url: f.url, coordinates: f.bounds });
-        else {
-          map.addSource("wpx-model-img", { type: "image", url: f.url, coordinates: f.bounds });
-          map.addLayer({ id: "wpx-model-img-layer", type: "raster", source: "wpx-model-img", paint: { "raster-opacity": opacity, "raster-fade-duration": 0 } }, before && map.getLayer(before) ? before : undefined);
-        }
-      } catch (error) { console.warn("Model image frame failed", error); }
-    }
-  }
-
-  function setPoints(map, id, data, color, changeKey) {
-    const had = !!map.getSource(id);
-    X.setGeoJson(map, id, data, changeKey);
-    if (!had && map.getSource(id)) {
-      X.addLayerOnce(map, { id: `${id}-dot`, type: "circle", source: id, paint: {
-        "circle-radius": ["interpolate", ["linear"], ["zoom"], 4, 2.5, 10, 6, 14, 9],
-        "circle-color": id === "wpx-gas" ? ["case", ["has", "price"], ["interpolate", ["linear"], ["to-number", ["get", "price"], 0], 2.5, "#3ddc84", 3.25, "#ffd84d", 4, "#ff8a3d", 5, "#ff3b3b"], color] : color,
-        "circle-stroke-color": "#08101f", "circle-stroke-width": 1.2
-      } });
-      if (id === "wpx-gas") X.addLayerOnce(map, { id: `${id}-label`, type: "symbol", source: id, minzoom: 10, filter: ["has", "price"], layout: { "text-field": ["number-format", ["to-number", ["get", "price"]], { "min-fraction-digits": 2, "max-fraction-digits": 2 }], "text-size": 11, "text-offset": [0, 1.2], "text-allow-overlap": false }, paint: { "text-color": "#fff", "text-halo-color": "#000", "text-halo-width": 1.2 } });
-    }
-  }
-
-  function setRoute(map) {
-    const had = !!map.getSource("wpx-route");
-    X.setGeoJson(map, "wpx-route", routeFeatureCollection(), `route:${route.rev}`);
-    if (!had && map.getSource("wpx-route")) {
-      X.addLayerOnce(map, { id: "wpx-route-line", type: "line", source: "wpx-route", filter: ["==", ["get", "kind"], "line"], paint: { "line-color": "#52e0fa", "line-width": 4, "line-opacity": 0.85 } });
-      X.addLayerOnce(map, { id: "wpx-route-pt", type: "circle", source: "wpx-route", filter: ["==", ["get", "kind"], "point"], paint: { "circle-radius": 8, "circle-color": ["get", "color"], "circle-stroke-color": "#08101f", "circle-stroke-width": 2 } });
-      X.addLayerOnce(map, { id: "wpx-route-lbl", type: "symbol", source: "wpx-route", filter: ["==", ["get", "kind"], "point"], layout: { "text-field": ["get", "label"], "text-size": 12, "text-offset": [0, -1.5] }, paint: { "text-color": "#fff", "text-halo-color": "#000", "text-halo-width": 1.4 } });
-    }
-  }
-
-  function bindMap(map) {
-    if (map.__wpxBound) return;
-    map.__wpxBound = true;
-    map.on("click", event => onMapClick(map, event));
-    map.on("moveend", () => { if (P.gas) loadGasTileAroundCenter(); });
-    map.on("styledata", () => { if (!map.getSource("wpx-route") && X.mapReady(map)) setTimeout(() => applyAll(), 0); });
-  }
-
-  function popup(map, lngLat, html) {
+  /* ================================================================ sheet framework */
+  const R = X.r31 = { tabs: [], layers: [], clicks: [], moves: [] };
+  R.addTab = tab => { R.tabs.push(tab); R.tabs.sort((a, b) => a.order - b.order); };
+  R.addLayer = fn => R.layers.push(fn);
+  R.addClick = (fn, priority) => { R.clicks.push({ fn, priority }); R.clicks.sort((a, b) => a.priority - b.priority); };
+  R.onMove = fn => R.moves.push(fn);
+  R.map = () => (typeof radarMap !== "undefined" ? radarMap : null);
+  R.prefs = P;
+  R.save = save;
+
+  R.chip = (action, label, active, extra = "") => `<button class="wpx-chip${active ? " active" : ""}" data-wpx="${action}" ${extra}>${esc(label)}</button>`;
+
+  R.popup = (map, lngLat, html) => {
     try {
       if (window.__wpxPopup) window.__wpxPopup.remove();
-      window.__wpxPopup = new maplibregl.Popup({ closeButton: true, maxWidth: "280px", className: "wpx-popup" }).setLngLat(lngLat).setHTML(html).addTo(map);
+      window.__wpxPopup = new maplibregl.Popup({ closeButton: true, maxWidth: "290px", className: "wpx-popup" }).setLngLat(lngLat).setHTML(html).addTo(map);
     } catch (error) { console.warn(error); }
-  }
+  };
 
-  async function onMapClick(map, event) {
-    const { lng, lat } = event.lngLat;
-    if (soundingArmed) {
-      soundingArmed = false;
-      syncSheetStatus();
-      openSounding(lat, lng);
-      return;
-    }
-    const hits = map.queryRenderedFeatures(event.point, { layers: ["wpx-gas-dot", "wpx-shelters-dot", "wpx-route-pt"].filter(id => map.getLayer(id)) });
-    const hit = hits[0];
-    if (hit) {
-      const p = hit.properties || {};
-      if (hit.layer.id === "wpx-gas-dot") {
-        popup(map, event.lngLat, `<strong>${esc(p.name || "Gas station")}</strong>${p.brand && p.brand !== p.name ? `<br><small>${esc(p.brand)}</small>` : ""}<br>${p.price ? `Regular: <b>$${Number(p.price).toFixed(2)}</b>` : "No price reported"}${p.updated ? `<br><small>Updated ${esc(timeLabel(p.updated))}</small>` : ""}`);
-      } else if (hit.layer.id === "wpx-shelters-dot") {
-        const name = p.name || p.NAME || p.title || "Tornado shelter";
-        const addr = p.address || p.ADDRESS || p.addr || "";
-        const detail = p.type || p.capacity || p.notes || p.description || "";
-        popup(map, event.lngLat, `<strong>${esc(name)}</strong>${addr ? `<br>${esc(addr)}` : ""}${detail ? `<br><small>${esc(detail)}</small>` : ""}<br><small>Confirm access with local officials before storms.</small>`);
-      } else if (hit.layer.id === "wpx-route-pt") {
-        const r = (route.results || [])[Number(p.idx)];
-        if (r) popup(map, event.lngLat, routePointHtml(r));
-      }
-      return;
-    }
-    if (P.mrms.product && mrmsLatest.key) {
-      try {
-        const json = await getJson(API.mrmsValue(mrmsLatest.key, lat.toFixed(4), lng.toFixed(4)), { label: "MRMS value" });
-        const value = pick(json, ["value", "v", "val"], null);
-        const units = pick(json, ["units", "unit"], (MRMS_PRODUCTS.find(p => p.id === P.mrms.product) || {}).units || "");
-        popup(map, event.lngLat, `<strong>${esc((MRMS_PRODUCTS.find(p => p.id === P.mrms.product) || {}).label || "MRMS")}</strong><br>${value === null || value === undefined ? "No value at this point" : `${esc(typeof value === "number" ? Math.round(value * 100) / 100 : value)} ${esc(units)}`}`);
-      } catch (error) { console.warn("MRMS probe failed", error); }
-      return;
-    }
-    if (P.model.on && P.model.run && P.model.field) {
-      try {
-        const json = await getJson(API.modelProbe(P.model.model, P.model.run, P.model.field, P.model.fhr, lat.toFixed(4), lng.toFixed(4)), { label: "Model probe" });
-        const value = pick(json, ["value", "v", "val"], null);
-        const units = pick(json, ["units", "unit"], "");
-        if (value !== null) popup(map, event.lngLat, `<strong>${esc(P.model.model.toUpperCase())} ${esc(fieldLabel())}</strong><br>F${esc(P.model.fhr)}: <b>${esc(typeof value === "number" ? Math.round(value * 10) / 10 : value)} ${esc(units)}</b>`);
-      } catch (error) { console.warn("Model probe failed", error); }
-    }
-  }
+  R.mapCenter = () => {
+    try { const map = R.map(); if (map) { const c = map.getCenter(); return { latitude: c.lat, longitude: c.lng }; } } catch (_) {}
+    return { latitude: state.location.latitude, longitude: state.location.longitude };
+  };
 
-  function fieldLabel() {
-    return ((studio.fields[P.model.model] || FALLBACK_FIELDS).find(f => f.id === P.model.field) || {}).label || P.model.field;
-  }
+  // Level III / MRMS / model rasters sit just under the main app's overlays (sites, lightning, warnings).
+  R.beforeId = () => (typeof rasterLayerBeforeId === "function" ? rasterLayerBeforeId("wp-nexrad-layer") : undefined);
 
-  function routePointHtml(r) {
-    const f = r.forecast;
-    return `<strong>${esc(r.place || `Mile ${Math.round(r.miles)}`)}</strong><br><small>Arrive ~${esc(new Date(r.eta).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }))} · mile ${Math.round(r.miles)}</small><br>${f ? `${esc(f.temperature)}°${esc(f.temperatureUnit || "F")} · ${esc(f.shortForecast)}<br><small>Wind ${esc(f.windSpeed || "--")} ${esc(f.windDirection || "")}${f.probabilityOfPrecipitation?.value != null ? ` · ${esc(f.probabilityOfPrecipitation.value)}% precip` : ""}</small>` : `<small>${esc(r.error || "No forecast")}</small>`}${r.alerts.length ? `<br><b style="color:#ff6b6b">${esc(r.alerts.join(", "))}</b>` : ""}`;
-  }
+  R.isOpen = () => !!document.getElementById("wpxRadarSheet");
 
-  /* ---------- Sheet UI ---------- */
-  const TABS = [["radar", "Radar"], ["mrms", "MRMS"], ["map", "Map"], ["route", "Route"], ["sounding", "Sounding"], ["models", "Models"]];
-
-  function isSheetOpen() { return !!document.getElementById("wpxRadarSheet"); }
-
-  function openSheet(tab) {
+  R.openSheet = tab => {
     if (tab) P.tab = tab;
     save();
-    if (!isSheetOpen()) {
+    if (!R.isOpen()) {
       const el = document.createElement("div");
       el.id = "wpxRadarSheet";
       el.className = "wpx-sheet";
       document.body.appendChild(el);
-      el.addEventListener("change", onSheetChange);
-      el.addEventListener("input", onSheetInput);
+      el.addEventListener("change", e => currentTab()?.onChange?.(e));
+      el.addEventListener("input", e => currentTab()?.onInput?.(e));
     }
-    loadSites().then(() => { if (P.tab === "radar") renderSheet(); });
-    loadServerProducts().then(() => { if (P.tab === "radar") renderSheet(); });
-    loadMrmsProducts();
-    renderSheet();
-  }
+    currentTab()?.onOpen?.();
+    R.renderSheet();
+  };
 
-  function closeSheet() {
+  R.closeSheet = () => {
     document.getElementById("wpxRadarSheet")?.remove();
-    soundingArmed = false;
-    setStudioPlaying(false);
-  }
+    R.tabs.forEach(t => t.onClose && t.onClose());
+  };
+
+  function currentTab() { return R.tabs.find(t => t.id === P.tab) || R.tabs[0]; }
+
+  R.renderSheet = () => {
+    const el = document.getElementById("wpxRadarSheet");
+    if (!el) return;
+    const tab = currentTab();
+    const body = el.querySelector(".wpx-sheet-body");
+    const scroll = body ? body.scrollTop : 0;
+    const focusId = document.activeElement && el.contains(document.activeElement) ? document.activeElement.id : "";
+    el.innerHTML = `<div class="wpx-sheet-head"><strong>Radar 3.1</strong><div class="wpx-tabs">${R.tabs.map(t => R.chip("sheetTab", t.label, t === tab, `data-tab="${t.id}"`)).join("")}</div><button class="wpx-icon-btn" data-wpx="closeSheet" aria-label="Close">×</button></div><div class="wpx-sheet-body">${tab ? tab.body() : ""}</div>`;
+    el.querySelector(".wpx-sheet-body").scrollTop = scroll;
+    if (focusId) document.getElementById(focusId)?.focus?.({ preventScroll: true });
+  };
+
+  // Re-render only when the sheet is showing that tab (async loads call this).
+  R.refreshTab = id => { if (R.isOpen() && P.tab === id) R.renderSheet(); };
+
   X.backHandlers.push(() => {
     if (X.topOverlay()) return false;
-    if (isSheetOpen()) { closeSheet(); return true; }
+    if (R.isOpen()) { R.closeSheet(); return true; }
     return false;
   });
 
-  function chip(action, label, active, extra = "") {
-    return `<button class="wpx-chip${active ? " active" : ""}" data-wpx="${action}" ${extra}>${esc(label)}</button>`;
+  /* ================================================================ layer sync + map events */
+  R.apply = force => {
+    const map = R.map();
+    if (!X.mapReady(map)) return;
+    bindMap(map);
+    const before = R.beforeId();
+    R.layers.forEach(fn => { try { fn(map, before, !!force); } catch (error) { console.warn("Radar 3.1 layer failed", error); } });
+  };
+
+  function bindMap(map) {
+    if (map.__wpxBound) return;
+    map.__wpxBound = true;
+    map.on("click", async event => {
+      for (const { fn } of R.clicks) {
+        try { if (await fn(map, event)) return; } catch (error) { console.warn("Radar 3.1 tap failed", error); }
+      }
+    });
+    map.on("moveend", () => R.moves.forEach(fn => { try { fn(map); } catch (error) { console.warn(error); } }));
+    // A style reload drops add-on sources; put them back once the new style is in.
+    map.on("styledata", () => {
+      if (!X.mapReady(map) || map.__wpxRestoring) return;
+      map.__wpxRestoring = true;
+      setTimeout(() => { map.__wpxRestoring = false; R.apply(); }, 0);
+    });
   }
 
-  function renderSheet() {
-    const el = document.getElementById("wpxRadarSheet");
-    if (!el) return;
-    const scroll = el.querySelector(".wpx-sheet-body")?.scrollTop || 0;
-    el.innerHTML = `<div class="wpx-sheet-head"><strong>Radar 3.1</strong><div class="wpx-tabs">${TABS.map(([id, label]) => chip("sheetTab", label, P.tab === id, `data-tab="${id}"`)).join("")}</div><button class="wpx-icon-btn" data-wpx="closeSheet" aria-label="Close">×</button></div><div class="wpx-sheet-body">${sheetBody()}</div>`;
-    el.querySelector(".wpx-sheet-body").scrollTop = scroll;
+  /* ================================================================ Level III site products */
+  const FAMILIES = [
+    { fam: "B", label: "High-res reflectivity", short: "REF" },
+    { fam: "G", label: "Velocity", short: "VEL" },
+    { fam: "S", label: "Storm-relative velocity", short: "SRV" },
+    { fam: "C", label: "Correlation coefficient (CC)", short: "CC" },
+    { fam: "X", label: "Differential reflectivity (ZDR)", short: "ZDR" },
+    { fam: "K", label: "Specific differential phase (KDP)", short: "KDP" },
+    { fam: "H", label: "Hydrometeor classification", short: "HCA" },
+    { fam: "EET", label: "Echo tops", short: "EET" },
+    { fam: "DVL", label: "Vertically integrated liquid (VIL)", short: "VIL" }
+  ];
+  const TILTS = [["0", "Lowest tilt"], ["1", "Tilt 2"], ["2", "Tilt 3"], ["3", "Tilt 4"]];
+  const catalog = {};
+  let sites = [];
+  let metaTimer = 0;
+  const L3 = { info: null, error: "", loading: false, timer: 0, want: "" };
+
+  const code = (fam = P.l3.fam, tilt = P.l3.tilt) => (fam.length === 3 ? fam : `N${tilt}${fam}`);
+  const tiltable = fam => !!fam && fam.length === 1;
+  const displayId = id => (/^[A-Z]{3}$/.test(id) ? ({ GUA: "PGUA", HKI: "PHKI", HKM: "PHKM", HMO: "PHMO", HWA: "PHWA", JUA: "TJUA" }[id] || `K${id}`) : id);
+  const kmBetween = (a, b) => { const dl = (a.lat - b.lat) * 111, dn = (a.lon - b.lon) * 111 * Math.cos(a.lat * Math.PI / 180); return Math.sqrt(dl * dl + dn * dn); };
+
+  function loadMeta() {
+    const tasks = [];
+    if (!Object.keys(catalog).length) {
+      tasks.push(getJson(API.radarProducts(), { label: "Radar products" }).then(j => { (j.products || []).forEach(p => { catalog[p.code] = p; }); }).catch(() => {}));
+    }
+    if (!sites.length) {
+      tasks.push(getJson(API.radarSites(), { label: "Radar sites" }).then(j => { sites = (j.sites || []).filter(s => s && s.id && Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lon))); }).catch(() => {}));
+    }
+    return Promise.all(tasks).then(() => {
+      clearTimeout(metaTimer);
+      if (!sites.length || !Object.keys(catalog).length) metaTimer = setTimeout(loadMeta, 15000);
+      R.refreshTab("radar");
+      if (P.l3.fam && !L3.info && !L3.loading) loadL3(true);
+    });
   }
 
-  function sheetBody() {
-    if (P.tab === "mrms") return mrmsBody();
-    if (P.tab === "map") return mapBody();
-    if (P.tab === "route") return routeBody();
-    if (P.tab === "sounding") return soundingBody();
-    if (P.tab === "models") return modelsBody();
-    return radarBody();
+  function siteList() {
+    if (sites.length) return sites;
+    // The render service's list is authoritative; fall back to the app's NEXRAD table until it loads.
+    return typeof RADAR_FALLBACK_SITES !== "undefined" ? RADAR_FALLBACK_SITES.map(([id, lat, lon]) => ({ id, name: "", lat, lon })) : [];
   }
 
-  function statusLine() {
-    if (!P.l3.on) return `<p class="wpx-note">Level III site mode is off; the main radar mosaic is showing.</p>`;
-    const code = l3Code();
-    const time = l3Latest.for.startsWith(`${currentSite()}/${code}/`) && l3Latest.time ? `scan ${timeLabel(l3Latest.time)}` : "latest scan";
-    return `<p class="wpx-note" id="wpxL3Status">${esc(currentSite())} ${esc(code)} · ${esc(time)}${l3Latest.error ? " · live tiles" : ""}</p>`;
+  function sitesByDistance(center = R.mapCenter()) {
+    const here = { lat: center.latitude, lon: center.longitude };
+    return siteList().map(s => Object.assign({ km: kmBetween(here, { lat: Number(s.lat), lon: Number(s.lon) }) }, s)).sort((a, b) => a.km - b.km);
   }
 
-  function radarBody() {
-    const families = L3_FAMILIES.concat(serverProducts || []);
-    const info = familyInfo(P.l3.family);
-    const sites = sitesByDistance();
-    const site = currentSite();
-    const pals = Object.entries(palettes);
-    const pal = P.l3.pal && palettes[P.l3.pal];
+  const siteId = () => (P.l3.site && P.l3.site !== "auto" ? P.l3.site : (sitesByDistance()[0] || {}).id || "");
+
+  const productPalettes = () => (X.prefs.productPalettes = X.prefs.productPalettes || {});
+  const palSpec = fam => (fam && fam !== "H" && productPalettes()[fam] ? productPalettes()[fam].spec : "");
+
+  async function latest(site, productCode) {
+    const info = await getJson(API.radarLatest(site, productCode), { label: "Latest radar scan" });
+    if (!info || !info.key) throw new Error("No scan is available");
+    return info;
+  }
+
+  function l3Status() {
+    if (!P.l3.fam) return "";
+    const sid = siteId();
+    if (!sid) return "Loading radar sites…";
+    if (L3.error) return `<b>${esc(displayId(sid))}</b>: ${esc(L3.error)} Try another site.`;
+    const info = L3.info;
+    if (!info) return `Loading <b>${esc(displayId(sid))}</b>…`;
+    const tilt = info.elevation ? ` ${Number(info.elevation).toFixed(1)}°` : "";
+    const when = new Date(info.valid);
+    const hhmm = Number.isNaN(when.getTime()) ? "" : when.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const age = Number(info.age_min);
+    return `<b>${esc(displayId(info.site || sid))}</b> · ${esc(info.label || code())}${esc(tilt)}${hhmm ? ` · ${esc(hhmm)}` : ""}${Number.isFinite(age) ? ` (${Math.round(age)} min ago)` : ""}${age > 20 ? " · <b>radar may be down</b>" : ""}`;
+  }
+
+  function loadL3(force) {
+    clearTimeout(L3.timer);
+    if (!P.l3.fam) return;
+    L3.timer = setTimeout(() => loadL3(true), 60000);
+    const sid = siteId();
+    const want = `${sid}/${code()}`;
+    if (!sid || (!force && L3.want === want && (L3.info || L3.loading))) return;
+    if (L3.want !== want) { L3.info = null; L3.error = ""; }
+    L3.want = want;
+    L3.loading = true;
+    syncStatus();
+    latest(sid, code()).then(info => {
+      if (L3.want !== want) return;
+      info.__want = want;
+      L3.info = info;
+      L3.error = "";
+    }).catch(error => {
+      if (L3.want !== want) return;
+      L3.info = null;
+      L3.error = String(error.message || error).replace(/\.?$/, ".");
+    }).finally(() => {
+      if (L3.want !== want) return;
+      L3.loading = false;
+      syncStatus();
+      R.apply();
+    });
+  }
+
+  function syncStatus() {
+    const el = document.getElementById("wpxL3Status");
+    if (el) el.innerHTML = l3Status();
+    const mr = document.getElementById("wpxMrmsStatus");
+    if (mr) mr.innerHTML = mrmsStatus();
+  }
+
+  R.addLayer((map, before) => {
+    const nexrad = map.getLayer("wp-nexrad-layer");
+    if (!P.l3.fam) {
+      X.removeLayerAndSource(map, "wpx-l3");
+      if (nexrad) try { map.setLayoutProperty("wp-nexrad-layer", "visibility", "visible"); } catch (_) {}
+      return;
+    }
+    // A single-site product replaces the national mosaic while it is selected (as on the website).
+    if (nexrad) try { map.setLayoutProperty("wp-nexrad-layer", "visibility", "none"); } catch (_) {}
+    const info = L3.info;
+    if (!info || info.__want !== `${siteId()}/${code()}`) { X.removeLayerAndSource(map, "wpx-l3"); return; }
+    X.setRaster(map, "wpx-l3", [API.radarTile(info.key, palSpec(P.l3.fam))], { opacity: P.l3.opacity, beforeId: before, maxzoom: 16, attribution: "NEXRAD Level III: NOAA/NWS · WeatherPower render" });
+  });
+
+  // Auto site follows the map center, like the website's "Nearest to map center".
+  R.onMove(() => {
+    if (!P.l3.fam || P.l3.site !== "auto") return;
+    if (`${siteId()}/${code()}` !== L3.want) loadL3(true);
+    R.refreshTab("radar");
+  });
+
+  function legendHtml(stops, classes, title, units) {
+    if (classes && classes.length) {
+      return `<div class="wpx-legend"><div class="wpx-legend-t">${esc(title)}</div><div class="wpx-classes">${classes.map(c => `<span><i style="background:${escA(c[2])}"></i>${esc(c[1])}</span>`).join("")}</div></div>`;
+    }
+    if (!stops || stops.length < 2) return "";
+    const lo = stops[0][0], hi = stops[stops.length - 1][0], span = (hi - lo) || 1;
+    const grad = stops.map(s => `${s[1]} ${(((s[0] - lo) / span) * 100).toFixed(1)}%`).join(",");
+    const mid = stops[Math.floor(stops.length / 2)][0];
+    const fmt = v => String(Math.abs(v) >= 10 ? Math.round(v) : Math.round(v * 100) / 100);
+    return `<div class="wpx-legend"><div class="wpx-legend-t">${esc(title)}${units ? ` <small>${esc(units)}</small>` : ""}</div><div class="wpx-palbar" style="background:linear-gradient(90deg,${escA(grad)})"></div><div class="wpx-palscale"><span>${esc(fmt(lo))}</span><span>${esc(fmt(mid))}</span><span>${esc(fmt(hi))}</span></div></div>`;
+  }
+
+  function l3Legend() {
+    let p = catalog[code()];
+    if (!P.l3.fam || !p) return "";
+    const imported = P.l3.fam !== "H" && productPalettes()[P.l3.fam];
+    if (imported) p = { label: `${p.label} · ${imported.name}`, units: p.units, stops: imported.stops.map(x => [x.value, x.color]) };
+    return legendHtml(p.stops, p.classes, p.label, p.units);
+  }
+
+  /* ================================================================ color tables (GR / WxTools palettes) */
+  const PAL_TARGETS = [["B", "Reflectivity"], ["G", "Velocity"], ["S", "Storm-relative velocity"], ["C", "Correlation coefficient (CC)"],
+    ["X", "Differential reflectivity (ZDR)"], ["K", "Specific differential phase (KDP)"], ["EET", "Echo tops"], ["DVL", "VIL"]];
+  const PAL_NAME = Object.fromEntries(PAL_TARGETS);
+  const pal = { pending: null, raw: "", target: "B", status: "", busy: false };
+
+  const clampByte = n => { n = Number(n); return Number.isFinite(n) ? Math.max(0, Math.min(255, Math.round(n))) : 0; };
+  const hex2 = n => clampByte(n).toString(16).padStart(2, "0");
+  const rgbHex = (r, g, b) => `#${hex2(r)}${hex2(g)}${hex2(b)}`;
+  function normalizeHex(v) {
+    v = String(v || "").trim();
+    if (/^#[0-9a-f]{3}$/i.test(v)) return `#${v.slice(1).split("").map(c => c + c).join("")}`.toLowerCase();
+    if (/^#[0-9a-f]{6}$/i.test(v)) return v.toLowerCase();
+    return null;
+  }
+  const safeName = v => String(v || "Imported Color Table").replace(/[\u0000-\u001f<>]/g, "").trim().slice(0, 96) || "Imported Color Table";
+  const parseNumber = v => { const n = Number(String(v).replace(/[^0-9+\-.eE]/g, "")); return Number.isFinite(n) ? n : null; };
+
+  function addStop(stops, value, color, alpha, endColor, endAlpha) {
+    const v = parseNumber(value), c = normalizeHex(color);
+    if (v === null || !c) return;
+    const stop = { value: v, color: c, alpha: alpha == null ? 1 : Math.max(0, Math.min(1, Number(alpha) || 0)) };
+    const ec = normalizeHex(endColor);
+    if (ec) {
+      stop.endColor = ec;
+      stop.endAlpha = endAlpha == null ? stop.alpha : Math.max(0, Math.min(1, Number(endAlpha) || 0));
+    }
+    stops.push(stop);
+  }
+
+  function parseJsonPalette(text, sourceName) {
+    const obj = JSON.parse(text);
+    const stops = [];
+    const arr = Array.isArray(obj) ? obj : obj && Array.isArray(obj.stops) ? obj.stops : obj && Array.isArray(obj.colors) ? obj.colors : obj && Array.isArray(obj.palette) ? obj.palette : [];
+    arr.forEach((x, i) => {
+      if (Array.isArray(x)) {
+        if (x.length >= 7) addStop(stops, x[0], rgbHex(x[1], x[2], x[3]), 1, rgbHex(x[4], x[5], x[6]), 1);
+        else if (x.length >= 4) addStop(stops, x[0], rgbHex(x[1], x[2], x[3]));
+        else if (x.length >= 2) addStop(stops, x[0], x[1]);
+      } else if (x && typeof x === "object") {
+        const value = x.value != null ? x.value : x.dbz != null ? x.dbz : x.level != null ? x.level : i;
+        const color = x.color || x.hex || (x.r != null ? rgbHex(x.r, x.g, x.b) : null);
+        const endColor = x.endColor || x.color2 || x.endHex || (x.r2 != null ? rgbHex(x.r2, x.g2, x.b2) : null);
+        addStop(stops, value, color, x.alpha, endColor, x.endAlpha != null ? x.endAlpha : x.alpha2);
+      }
+    });
+    if (stops.length < 2) throw new Error("No usable color stops were found in the JSON file.");
+    return { name: safeName((obj && (obj.name || obj.title || obj.paletteName)) || sourceName), units: String((obj && obj.units) || "dBZ"), product: String((obj && obj.product) || "reflectivity"), stops };
+  }
+
+  function parseTextPalette(text, sourceName) {
+    const stops = [];
+    let name = sourceName || "Imported Color Table", units = "dBZ", product = "reflectivity";
+    String(text || "").replace(/^﻿/, "").split(/\r?\n/).forEach(raw => {
+      const line = String(raw || "").replace(/;.*$/, "").trim(); // GRLevelX comments start with ';'
+      if (!line || /^(#|\/\/)/.test(line)) return;
+      let m;
+      if ((m = line.match(/^(?:name|title)\s*[:=]\s*(.+)$/i))) { name = safeName(m[1]); return; }
+      if ((m = line.match(/^units?\s*[:=]\s*(.+)$/i))) { units = safeName(m[1]); return; }
+      if ((m = line.match(/^product\s*[:=]\s*(.+)$/i))) { product = safeName(m[1]); return; }
+      // GRLevelX v2: Color: v R G B [R2 G2 B2] · Color4: v R G B A [R2 G2 B2 A2] · SolidColor(4): single color band.
+      // The optional second color is the end of the gradient band that runs to the next value.
+      m = line.match(/^(color4|solidcolor4|color|solidcolor)\s*:\s*(.+)$/i);
+      if (m) {
+        const kind = m[1].toLowerCase();
+        const nums = (m[2].match(/[-+]?\d+(?:\.\d+)?/g) || []).map(Number);
+        if (nums.length < 4) return;
+        const value = nums[0];
+        if (kind === "color" || kind === "solidcolor") {
+          const c1 = rgbHex(nums[1], nums[2], nums[3]);
+          if (kind === "solidcolor") addStop(stops, value, c1, 1, c1, 1);
+          else if (nums.length >= 7) addStop(stops, value, c1, 1, rgbHex(nums[4], nums[5], nums[6]), 1);
+          else addStop(stops, value, c1, 1);
+          return;
+        }
+        if (nums.length < 5) return;
+        const a1 = Math.max(0, Math.min(255, Number(nums[4]) || 0)) / 255;
+        const c4 = rgbHex(nums[1], nums[2], nums[3]);
+        if (kind === "solidcolor4") addStop(stops, value, c4, a1, c4, a1);
+        else if (nums.length >= 9) addStop(stops, value, c4, a1, rgbHex(nums[5], nums[6], nums[7]), Math.max(0, Math.min(255, Number(nums[8]) || 0)) / 255);
+        else addStop(stops, value, c4, a1);
+        return;
+      }
+      if ((m = line.match(/^([-+]?\d+(?:\.\d+)?)\s*[,;\s]\s*(#[0-9a-f]{3,6})\b/i))) { addStop(stops, m[1], m[2]); return; }
+      if ((m = line.match(/^([-+]?\d+(?:\.\d+)?)\s*[,;\s]+\s*([0-9]{1,3})\s*[,;\s]+\s*([0-9]{1,3})\s*[,;\s]+\s*([0-9]{1,3})/))) { addStop(stops, m[1], rgbHex(m[2], m[3], m[4])); return; }
+      if ((m = line.match(/^([-+]?\d+(?:\.\d+)?)\s*[:=]\s*rgb\(\s*([0-9]{1,3})\s*,\s*([0-9]{1,3})\s*,\s*([0-9]{1,3})\s*\)/i))) addStop(stops, m[1], rgbHex(m[2], m[3], m[4]));
+    });
+    if (stops.length < 2) throw new Error("Not enough color stops were found. Use a GR2Analyst / GRLevel3, WxTools or RadarScope palette.");
+    return { name: safeName(name), units, product, stops };
+  }
+
+  function parsePalette(text, sourceName) {
+    const trimmed = String(text || "").trim();
+    if (!trimmed) throw new Error("The palette file was empty.");
+    const p = /^[[{]/.test(trimmed) ? parseJsonPalette(trimmed, sourceName) : parseTextPalette(trimmed, sourceName);
+    p.stops = p.stops.filter(s => Number.isFinite(s.value) && normalizeHex(s.color)).sort((a, b) => a.value - b.value);
+    const dedup = [];
+    p.stops.forEach(s => { if (dedup.length && dedup[dedup.length - 1].value === s.value) dedup[dedup.length - 1] = s; else dedup.push(s); });
+    p.stops = dedup;
+    return p;
+  }
+
+  function detectTarget(p, raw) {
+    const t = `${(p && p.product) || ""} ${(p && p.name) || ""} ${(String(raw || "").match(/^\s*product\s*[:=].*$/im) || [""])[0]}`.toLowerCase();
+    if (/\bsrv\b|storm.?rel/.test(t)) return "S";
+    if (/\b(bv|vel|velocity|n0u|n0g|n0v)\b/.test(t) || /\b(kts?|knots|mph|m\/s)\b/i.test((p && p.units) || "")) return "G";
+    if (/\b(cc|rho|rhohv|correl)/.test(t)) return "C";
+    if (/\bzdr\b|diff\w*\s*refl/.test(t)) return "X";
+    if (/\bkdp\b|specific/.test(t)) return "K";
+    if (/\b(et|eet|echo\s*tops?)\b/.test(t)) return "EET";
+    if (/\bvil\b/.test(t)) return "DVL";
+    return "B";
+  }
+
+  // Server products use kt for velocity, a 0–1 fraction for CC and kft for echo tops.
+  function convertPalette(p, target) {
+    const u = String(p.units || "").toLowerCase();
+    let f = 1, note = "";
+    if (target === "G" || target === "S") {
+      if (/mph/.test(u)) { f = 0.868976; note = "mph → kt"; } else if (/m\/?s|mps|meters/.test(u)) { f = 1.943844; note = "m/s → kt"; }
+    } else if (target === "C") {
+      if (p.stops[p.stops.length - 1].value > 2) { f = 0.01; note = "percent → fraction"; }
+    } else if (target === "EET" && /\bkm\b/.test(u)) { f = 3.28084; note = "km → kft"; }
+    return { stops: p.stops.map(s => Object.assign({}, s, { value: Math.round(s.value * f * 10000) / 10000 })), note };
+  }
+
+  const hexA = (c, a) => { const h = String(c || "#000000").replace("#", "").slice(0, 6); return a != null && a < 1 ? h + (`0${Math.round(a * 255).toString(16)}`).slice(-2) : h; };
+  // The render service's ?pal= format: value_rrggbb[aa][_rrggbb[aa]] stops joined with "~".
+  const palSpecOf = stops => stops.slice(0, 96).map(s => `${String(Number(s.value.toFixed(4)))}_${hexA(s.color, s.alpha)}${s.endColor ? `_${hexA(s.endColor, s.endAlpha)}` : ""}`).join("~");
+
+  function gradientCss(stops) {
+    const lo = stops[0].value, hi = stops[stops.length - 1].value, span = Math.max(1e-6, hi - lo);
+    return `linear-gradient(90deg,${stops.map(s => `${s.color} ${(((s.value - lo) / span) * 100).toFixed(1)}%`).join(",")})`;
+  }
+
+  // Google Drive / Dropbox / GitHub share links point at web pages; turn them into the raw file.
+  function directLink(u) {
+    try {
+      const x = new URL(u);
+      let m;
+      if (/^drive\.google\.com$/i.test(x.hostname) && (m = x.pathname.match(/\/file\/d\/([^/]+)/))) return `https://drive.google.com/uc?export=download&id=${m[1]}`;
+      if (/^drive\.google\.com$/i.test(x.hostname) && x.pathname === "/open" && x.searchParams.get("id")) return `https://drive.google.com/uc?export=download&id=${x.searchParams.get("id")}`;
+      if (/^(www\.)?dropbox\.com$/i.test(x.hostname)) { x.searchParams.set("dl", "1"); return x.href; }
+      if (/^github\.com$/i.test(x.hostname) && (m = x.pathname.match(/^\/([^/]+)\/([^/]+)\/blob\/(.+)$/))) return `https://raw.githubusercontent.com/${m[1]}/${m[2]}/${m[3]}`;
+    } catch (_) {}
+    return u;
+  }
+
+  function previewPalette(text, sourceName) {
+    try {
+      const p = parsePalette(text, sourceName);
+      pal.pending = p;
+      pal.raw = text;
+      pal.target = detectTarget(p, text);
+      pal.status = "";
+    } catch (error) {
+      pal.pending = null;
+      pal.status = error.message || "That palette could not be read.";
+    }
+    R.refreshTab("radar");
+  }
+
+  function importPaletteFile(file) {
+    if (!file) return;
+    if (file.size > 1048576) { pal.status = "Palette file is larger than 1 MB."; R.refreshTab("radar"); return; }
+    const reader = new FileReader();
+    reader.onload = () => previewPalette(String(reader.result || ""), (file.name || "Imported").replace(/\.[^.]+$/, ""));
+    reader.onerror = () => { pal.status = "That file could not be opened."; R.refreshTab("radar"); };
+    reader.readAsText(file);
+  }
+
+  async function importPaletteLink(url) {
+    url = String(url || "").trim();
+    if (!url) { pal.status = "Paste a palette link first."; R.refreshTab("radar"); return; }
+    let parsed;
+    try { parsed = new URL(url); } catch (_) { pal.status = "That link isn't a valid web address."; R.refreshTab("radar"); return; }
+    if (parsed.protocol !== "https:") { pal.status = "Only HTTPS palette links are accepted."; R.refreshTab("radar"); return; }
+    pal.busy = true;
+    pal.status = "Downloading the color table…";
+    R.refreshTab("radar");
+    try {
+      const text = await getText(API.paletteFetch(directLink(parsed.href)), { timeoutMs: 30000 });
+      if (text.length > 1048576) throw new Error("Palette file is larger than 1 MB.");
+      if (!text.trim()) throw new Error("The downloaded file was empty.");
+      const nameFromUrl = decodeURIComponent(parsed.pathname.split("/").pop() || "Imported").replace(/\.[^.]+$/, "");
+      pal.busy = false;
+      previewPalette(text, nameFromUrl);
+    } catch (error) {
+      pal.busy = false;
+      pal.status = error.message || "Could not import this color table.";
+      R.refreshTab("radar");
+    }
+  }
+
+  function applyPendingPalette() {
+    const p = pal.pending;
+    if (!p) return;
+    const c = convertPalette(p, pal.target);
+    productPalettes()[pal.target] = { name: p.name, stops: c.stops, spec: palSpecOf(c.stops), units: p.units || "", importedAt: new Date().toISOString() };
+    save();
+    say(`${PAL_NAME[pal.target]} color table imported: ${p.name}`);
+    pal.pending = null;
+    pal.status = "";
+    if (P.l3.fam === pal.target) R.apply();
+    R.refreshTab("radar");
+  }
+
+  function paletteSection() {
+    const saved = productPalettes();
+    const pending = pal.pending;
+    const conv = pending ? convertPalette(pending, pal.target) : null;
     return `
-      <div class="wpx-row"><strong>Level III site radar</strong><label class="wpx-switch"><input type="checkbox" id="wpxL3On"${P.l3.on ? " checked" : ""}><span></span></label></div>
-      ${statusLine()}
-      <div class="wpx-label">Radar site</div>
+      <div class="wpx-label">Color tables</div>
       <div class="wpx-inline">
-        <select id="wpxSite" aria-label="Radar site">${(sites.length ? sites : [{ id: site, name: "", miles: 0 }]).slice(0, 160).map(s => `<option value="${escA(s.id)}"${s.id === site ? " selected" : ""}>${esc(s.id)}${s.name ? ` · ${esc(s.name)}` : ""}${Number.isFinite(s.miles) && s.miles ? ` · ${Math.round(s.miles)} mi` : ""}</option>`).join("")}</select>
-        <button class="wpx-btn" data-wpx="nearestSite">Nearest</button>
+        <label class="wpx-btn wpx-file">Import file<input type="file" id="wpxPalFile" accept=".pal,.txt,.json,text/plain,application/json,application/octet-stream"></label>
+        <input type="search" id="wpxPalUrl" placeholder="…or paste a Drive / Dropbox / GitHub link" aria-label="Palette link">
+        <button class="wpx-btn" data-wpx="palFetch"${pal.busy ? " disabled" : ""}>Fetch</button>
       </div>
-      <div class="wpx-label">Product</div>
-      <div class="wpx-chips">${families.map(f => chip("l3Family", f.short, P.l3.family === f.family, `data-family="${escA(f.family)}" title="${escA(f.label)}"`)).join("")}</div>
-      <p class="wpx-note">${esc(info.label)}${info.units ? ` (${esc(info.units)})` : ""}</p>
-      <div class="wpx-label">Tilt</div>
-      <div class="wpx-chips">${TILTS.map((label, i) => `<button class="wpx-chip${Number(P.l3.tilt) === i ? " active" : ""}" data-wpx="l3Tilt" data-tilt="${i}"${info.tilts ? "" : " disabled"}>${esc(label)}</button>`).join("")}</div>
+      ${pal.status ? `<p class="wpx-note">${esc(pal.status)}</p>` : ""}
+      ${pending ? `<div class="wpx-card">
+        <strong>${esc(pending.name)}</strong><small class="wpx-sub"> · ${pending.stops.length} stops${pending.units ? ` · ${esc(pending.units)}` : ""}</small>
+        <div class="wpx-palbar" style="background:${escA(gradientCss(pending.stops))}"></div>
+        <div class="wpx-inline" style="margin-top:8px"><span class="wpx-sub">Apply to</span><select id="wpxPalTarget" aria-label="Apply palette to">${PAL_TARGETS.map(([k, n]) => `<option value="${k}"${k === pal.target ? " selected" : ""}>${esc(n)}</option>`).join("")}</select></div>
+        ${conv && conv.note ? `<p class="wpx-note">Units converted: ${esc(conv.note)}.</p>` : ""}
+        <div class="wpx-btnrow"><button class="wpx-btn primary" data-wpx="palApply">Apply</button><button class="wpx-btn subtle" data-wpx="palCancel">Cancel</button></div>
+      </div>` : ""}
+      ${Object.keys(saved).length ? `<div class="wpx-pallist">${Object.entries(saved).map(([k, s]) => `<div class="wpx-palitem"><i style="background:${escA(gradientCss(s.stops))}"></i><span>${esc(PAL_NAME[k] || k)} <small>· ${esc(s.name)}</small></span><button data-wpx="palRemove" data-k="${escA(k)}" aria-label="Reset ${escA(PAL_NAME[k] || k)} to WeatherPower colors">×</button></div>`).join("")}</div>` : `<p class="wpx-note">Imported tables recolor the matching site product (a velocity table recolors Velocity, and so on).</p>`}`;
+  }
+
+  /* ================================================================ Radar tab */
+  function radarBody() {
+    const fam = P.l3.fam;
+    const near = sitesByDistance().slice(0, 15);
+    const chosen = P.l3.site !== "auto" && !near.some(s => s.id === P.l3.site) ? siteList().find(s => s.id === P.l3.site) : null;
+    const opt = s => `<option value="${escA(s.id)}"${P.l3.site === s.id ? " selected" : ""}>${esc(displayId(s.id))}${s.name ? ` · ${esc(s.name)}` : ""}${Number.isFinite(s.km) ? ` (${Math.round(s.km * 0.621)} mi)` : ""}</option>`;
+    return `
+      <div class="wpx-label">Radar product</div>
+      <div class="wpx-chips">${R.chip("l3Fam", "Composite", !fam, 'data-fam="" title="National mosaic"')}${FAMILIES.map(f => R.chip("l3Fam", f.short, fam === f.fam, `data-fam="${f.fam}" title="${escA(f.label)}"`)).join("")}</div>
+      <p class="wpx-note">${fam ? esc((FAMILIES.find(f => f.fam === fam) || {}).label || fam) : "Composite: the national radar mosaic from the main radar controls."}</p>
+      ${tiltable(fam) ? `<div class="wpx-label">Product tilt</div><div class="wpx-chips">${TILTS.map(([t, label]) => R.chip("l3Tilt", label, P.l3.tilt === t, `data-tilt="${t}"`)).join("")}</div>` : ""}
+      ${fam ? `<div class="wpx-label">Radar site</div>
+      <select id="wpxSite" aria-label="Radar site"><option value="auto"${P.l3.site === "auto" ? " selected" : ""}>Nearest to map center</option>${chosen ? opt(chosen) : ""}${near.map(opt).join("")}</select>
+      <p class="wpx-note" id="wpxL3Status">${l3Status()}</p>
+      ${l3Legend()}
       <div class="wpx-label">Opacity <span id="wpxL3OpacityValue">${Math.round(P.l3.opacity * 100)}%</span></div>
-      <input type="range" id="wpxL3Opacity" min="20" max="100" value="${Math.round(P.l3.opacity * 100)}" aria-label="Level III opacity">
-      <div class="wpx-label">Color palette</div>
-      <div class="wpx-inline">
-        <select id="wpxPal" aria-label="Palette"><option value="">WeatherPower default</option>${pals.map(([id, p]) => `<option value="${escA(id)}"${P.l3.pal === id ? " selected" : ""}>${esc(p.name)}${p.product ? ` (${esc(p.product)})` : ""}</option>`).join("")}</select>
-        <label class="wpx-btn wpx-file">Import .pal<input type="file" id="wpxPalFile" accept=".pal,.txt,text/plain,application/octet-stream"></label>
-      </div>
-      ${pal ? `${paletteBar(pal.stops)}<div class="wpx-btnrow"><button class="wpx-btn subtle" data-wpx="deletePal">Remove “${esc(pal.name)}”</button></div>` : `<p class="wpx-note">Import a GR2Analyst / GR Level 3 or RadarScope .pal file to recolor site products.</p>`}`;
+      <input type="range" id="wpxL3Opacity" min="20" max="100" value="${Math.round(P.l3.opacity * 100)}" aria-label="Site product opacity">` : ""}
+      ${paletteSection()}`;
+  }
+
+  R.addTab({
+    id: "radar", label: "Radar", order: 10, body: radarBody,
+    onOpen: () => { loadMeta(); },
+    onInput: e => {
+      if (e.target.id === "wpxL3Opacity") {
+        P.l3.opacity = Number(e.target.value) / 100;
+        const label = document.getElementById("wpxL3OpacityValue");
+        if (label) label.textContent = `${e.target.value}%`;
+        try { R.map()?.setPaintProperty("wpx-l3-layer", "raster-opacity", P.l3.opacity); } catch (_) {}
+        save();
+      }
+    },
+    onChange: e => {
+      const t = e.target;
+      if (t.id === "wpxSite") { P.l3.site = t.value; save(); loadL3(true); R.apply(); R.renderSheet(); }
+      else if (t.id === "wpxPalFile") { importPaletteFile(t.files && t.files[0]); t.value = ""; }
+      else if (t.id === "wpxPalTarget") { pal.target = t.value; R.renderSheet(); }
+    }
+  });
+
+  /* ================================================================ MRMS */
+  const WINDOW_LABEL = { 30: "30 min", 60: "1 hour", 120: "2 hours", 240: "4 hours", 360: "6 hours", 1440: "24 hours",
+    "01": "1 hour", "03": "3 hours", "06": "6 hours", 12: "12 hours", 24: "24 hours", 48: "48 hours", 72: "72 hours" };
+  const DEF_WINDOW = { hail: "1440", rotation: "1440", rotation_mid: "1440", rain: "24" };
+  const MRMS_CHOICES = [["hail", "Hail swath (max hail size)"], ["rotation", "Rotation track (low-level)"], ["rotation_mid", "Rotation track (mid-level)"], ["rain", "Rainfall total"]];
+  const mrmsCatalog = {};
+  const MR = { info: null, error: "", timer: 0, want: "" };
+
+  const windowLabel = w => WINDOW_LABEL[w] || String(w);
+  const fmtMrms = (product, v) => (product.indexOf("rotation") === 0 ? `${v.toFixed(3)} s⁻¹` : `${v < 1 ? v.toFixed(2) : v.toFixed(v < 10 ? 2 : 1)} in`);
+
+  function loadMrmsCatalog() {
+    if (Object.keys(mrmsCatalog).length) return Promise.resolve(mrmsCatalog);
+    return getJson(API.mrmsProducts(), { label: "MRMS products" }).then(j => { (j.products || []).forEach(p => { mrmsCatalog[p.code] = p; }); return mrmsCatalog; });
+  }
+
+  function mrmsWindows(product) {
+    const p = mrmsCatalog[product];
+    return p && Array.isArray(p.windows) && p.windows.length ? p.windows.map(String) : [DEF_WINDOW[product]];
+  }
+
+  function mrmsDefaults() {
+    if (!P.mrms.product) return;
+    const wins = mrmsWindows(P.mrms.product);
+    if (!wins.includes(String(P.mrms.window))) P.mrms.window = wins.includes(DEF_WINDOW[P.mrms.product]) ? DEF_WINDOW[P.mrms.product] : wins[wins.length - 1];
+  }
+
+  function mrmsStatus() {
+    if (!P.mrms.product) return "";
+    if (MR.error) return `MRMS unavailable: ${esc(MR.error)}`;
+    const j = MR.info;
+    if (!j) return "Loading NOAA MRMS…";
+    const t = new Date(j.valid);
+    return `<b>${esc(j.label || P.mrms.product)}</b> · last ${esc(windowLabel(P.mrms.window))}${Number.isNaN(t.getTime()) ? "" : ` · through ${esc(t.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }))}`}${Number.isFinite(Number(j.age_min)) ? ` (${Math.round(j.age_min)} min ago)` : ""} · tap the map for a value`;
+  }
+
+  function loadMrms(force) {
+    clearTimeout(MR.timer);
+    if (!P.mrms.product) return;
+    MR.timer = setTimeout(() => loadMrms(true), 5 * 60000);
+    const want = `${P.mrms.product}/${P.mrms.window}`;
+    if (!force && MR.want === want && MR.info) return;
+    if (MR.want !== want) MR.info = null;
+    MR.want = want;
+    MR.error = "";
+    syncStatus();
+    getJson(API.mrmsLatest(P.mrms.product, P.mrms.window), { label: "MRMS latest" }).then(j => {
+      if (MR.want !== want || j.product !== P.mrms.product || String(j.window) !== String(P.mrms.window)) return;
+      if (!j.key) throw new Error("No MRMS scan is available right now");
+      MR.info = j;
+    }).catch(error => {
+      if (MR.want !== want) return;
+      MR.info = null;
+      MR.error = String(error.message || error);
+    }).finally(() => {
+      if (MR.want !== want) return;
+      syncStatus();
+      R.apply();
+    });
+  }
+
+  R.addLayer((map, before) => {
+    if (!P.mrms.product || !MR.info || MR.want !== `${P.mrms.product}/${P.mrms.window}`) { X.removeLayerAndSource(map, "wpx-mrms"); return; }
+    X.setRaster(map, "wpx-mrms", [API.mrmsTile(MR.info.key)], { opacity: P.mrms.opacity, beforeId: before, maxzoom: 14, attribution: "MRMS: NOAA/NSSL" });
+  });
+
+  R.addClick(async (map, event) => {
+    if (!P.mrms.product || !MR.info) return false;
+    const { lng, lat } = event.lngLat;
+    const j = await getJson(API.mrmsValue(MR.info.key, lat, lng), { label: "MRMS value" });
+    const p = mrmsCatalog[P.mrms.product];
+    const floor = p && p.stops && p.stops.length ? p.stops[0][0] : 0;
+    const v = j.value;
+    const what = P.mrms.product === "hail" ? "Max hail size" : P.mrms.product === "rain" ? "Rainfall" : "Peak rotation";
+    R.popup(map, event.lngLat, `${esc(what)}<br><b>${v == null ? "Outside MRMS coverage" : Number(v) < floor ? "None recorded" : esc(fmtMrms(P.mrms.product, Number(v)))}</b><br><small>Last ${esc(windowLabel(P.mrms.window))} · NOAA MRMS estimate for this ~1 km cell</small>`);
+    return true;
+  }, 30);
+
+  function mrmsLegend() {
+    const p = mrmsCatalog[P.mrms.product];
+    if (!p || !p.stops || !p.stops.length) return "";
+    return `<div class="wpx-legend"><div class="wpx-legend-t">${esc(p.label)} <small>${esc(windowLabel(P.mrms.window))} · NOAA MRMS</small></div><div class="wpx-swatches">${p.stops.map(s => `<i style="background:${escA(s[1])}"></i>`).join("")}</div><div class="wpx-palscale"><span>${esc(fmtMrms(p.code, p.stops[0][0]))}</span><span>${esc(fmtMrms(p.code, p.stops[p.stops.length - 1][0]))}+</span></div></div>`;
   }
 
   function mrmsBody() {
-    const product = MRMS_PRODUCTS.find(p => p.id === P.mrms.product);
-    const status = !product ? "Off" : mrmsLatest.error ? mrmsLatest.error : mrmsLatest.time ? `Valid ${timeLabel(mrmsLatest.time)}` : "Loading latest…";
+    const product = P.mrms.product;
     return `
-      <div class="wpx-label">MRMS layer</div>
-      <div class="wpx-chips">${chip("mrmsProduct", "Off", !P.mrms.product, 'data-id=""')}${MRMS_PRODUCTS.map(p => chip("mrmsProduct", p.label, P.mrms.product === p.id, `data-id="${p.id}"`)).join("")}</div>
-      ${product ? `<div class="wpx-label">Accumulation window</div><div class="wpx-chips">${product.windows.map(w => chip("mrmsWindow", windowLabel(w), String(P.mrms.window) === String(w), `data-w="${escA(w)}"`)).join("")}</div>
+      <div class="wpx-label">Storm damage layers (MRMS)</div>
+      <div class="wpx-chips">${R.chip("mrmsProduct", "Off", !product, 'data-id=""')}${MRMS_CHOICES.map(([id, label]) => R.chip("mrmsProduct", label, product === id, `data-id="${id}"`)).join("")}</div>
+      ${product ? `<div class="wpx-label">Time window</div><div class="wpx-chips">${mrmsWindows(product).map(w => R.chip("mrmsWindow", windowLabel(w), String(P.mrms.window) === w, `data-w="${escA(w)}"`)).join("")}</div>
+      <p class="wpx-note" id="wpxMrmsStatus">${mrmsStatus()}</p>
+      ${mrmsLegend()}
       <div class="wpx-label">Opacity</div><input type="range" id="wpxMrmsOpacity" min="20" max="100" value="${Math.round(P.mrms.opacity * 100)}" aria-label="MRMS opacity">` : ""}
-      <p class="wpx-note" id="wpxMrmsStatus">${esc(status)}</p>
-      <p class="wpx-note">Tap the map to read the MRMS value at a point. Data: NOAA/NSSL Multi-Radar Multi-Sensor.</p>`;
+      <p class="wpx-note">Values are NOAA Multi-Radar/Multi-Sensor estimates; an empty map means none were recorded.</p>`;
   }
 
-  function mapBody() {
-    const eia = gas.eia;
-    const areaNames = { NUS: "U.S. average", R10: "East Coast", R20: "Midwest", R30: "Gulf Coast", R40: "Rocky Mountain", R50: "West Coast" };
-    return `
-      <div class="wpx-row"><div><strong>Gas stations</strong><small>Station prices from WeatherPower + EIA averages</small></div><label class="wpx-switch"><input type="checkbox" id="wpxGasOn"${P.gas ? " checked" : ""}><span></span></label></div>
-      ${P.gas ? `${gas.loading ? `<p class="wpx-note">Loading stations…</p>` : gas.error ? `<p class="wpx-note">${esc(gas.error)}</p>` : `<p class="wpx-note">${(gas.features || []).length.toLocaleString()} stations · zoom in past 9 for more detail</p>`}
-      ${eia ? eia.loading ? `<p class="wpx-note">Loading EIA prices…</p>` : eia.rows.length ? `<div class="wpx-kv">${eia.rows.map(r => `<div><small>${esc(areaNames[r.duoarea] || r["area-name"] || r.duoarea)}</small><strong>$${Number(r.value).toFixed(3)}</strong></div>`).join("")}</div><p class="wpx-note">EIA weekly regular gasoline, week of ${esc(eia.period)}.</p>` : `<p class="wpx-note">EIA prices unavailable${eia.error ? `: ${esc(eia.error)}` : ""}.</p>` : ""}` : ""}
-      <div class="wpx-row"><div><strong>Tornado shelters</strong><small>Public shelter locations</small></div><label class="wpx-switch"><input type="checkbox" id="wpxShelterOn"${P.shelters ? " checked" : ""}><span></span></label></div>
-      ${P.shelters ? shelters.loading ? `<p class="wpx-note">Loading shelters…</p>` : shelters.error ? `<p class="wpx-note">${esc(shelters.error)}</p>` : `<p class="wpx-note">${(shelters.features || []).length.toLocaleString()} shelters on the map. Always confirm a shelter is open before severe weather.</p>` : ""}`;
-  }
-
-  function routeBody() {
-    const from = route.from || { name: `${state.location.name} (current)` };
-    return `
-      <div class="wpx-label">From</div>
-      <div class="wpx-inline"><input type="search" id="wpxRouteFrom" placeholder="${escA(from.name)}" aria-label="Start"><button class="wpx-btn" data-wpx="routeFromHere">Here</button></div>
-      ${route.fromResults.length ? `<div class="wpx-results">${route.fromResults.map((r, i) => `<button class="wpx-result" data-wpx="routePick" data-which="from" data-i="${i}">${esc(r.name)}<small>${esc(r.subtitle || "")}</small></button>`).join("")}</div>` : `<p class="wpx-note">${esc(from.name)}</p>`}
-      <div class="wpx-label">To</div>
-      <input type="search" id="wpxRouteTo" placeholder="${escA(route.to ? route.to.name : "City, state, or ZIP")}" aria-label="Destination">
-      ${route.toResults.length ? `<div class="wpx-results">${route.toResults.map((r, i) => `<button class="wpx-result" data-wpx="routePick" data-which="to" data-i="${i}">${esc(r.name)}<small>${esc(r.subtitle || "")}</small></button>`).join("")}</div>` : route.to ? `<p class="wpx-note">${esc(route.to.name)}${route.to.subtitle ? `, ${esc(route.to.subtitle)}` : ""}</p>` : ""}
-      <div class="wpx-label">Leave</div>
-      <div class="wpx-chips">${[[0, "Now"], [1, "+1 h"], [2, "+2 h"], [4, "+4 h"], [8, "+8 h"]].map(([h, l]) => chip("routeDepart", l, Number(route.depart) === h, `data-h="${h}"`)).join("")}</div>
-      <div class="wpx-btnrow"><button class="wpx-btn primary" data-wpx="routeGo"${route.loading ? " disabled" : ""}>${route.loading ? "Checking route…" : "Get route weather"}</button>${route.geometry ? `<button class="wpx-btn subtle" data-wpx="routeClear">Clear</button>` : ""}</div>
-      ${route.error ? `<p class="wpx-note">${esc(route.error)}</p>` : ""}
-      ${route.summary ? `<p class="wpx-note">${Math.round(route.summary.miles)} mi · about ${route.summary.hours.toFixed(1)} h${route.straight ? " · routing unavailable, showing direct line" : ""}. Forecasts: NWS hourly at your estimated arrival time.</p>` : ""}
-      ${(route.results || []).map(r => `<div class="wpx-route-stop${r.alerts.length ? " alert" : ""}">${routePointHtml(r)}</div>`).join("")}`;
-  }
-
-  function soundingBody() {
-    return `
-      <p class="wpx-note">Point soundings use the HRRR (0–18 h) from the WeatherPower sounding service.</p>
-      <div class="wpx-btnrow"><button class="wpx-btn primary" data-wpx="armSounding">${soundingArmed ? "Tap the map now…" : "Tap map for a sounding"}</button><button class="wpx-btn" data-wpx="soundingHere">At ${esc(state.location.name)}</button></div>`;
-  }
-
-  function modelsBody() {
-    const runs = studio.runs[P.model.model] || [];
-    const fields = studio.fields[P.model.model] || FALLBACK_FIELDS;
-    const hours = studio.hours[`${P.model.model}/${P.model.run}`] || [];
-    if (!P.model.on) return `<p class="wpx-note">Model Studio draws HRRR, NAM, GFS and ECMWF forecast fields on this map, with hour-by-hour playback and tap-to-probe values.</p><div class="wpx-btnrow"><button class="wpx-btn primary" data-wpx="studioOpen">Open Model Studio</button></div>`;
-    return `
-      <div class="wpx-chips">${MODELS.map(m => chip("studioModel", m.label, P.model.model === m.id, `data-id="${m.id}"`)).join("")}</div>
-      ${studio.loading ? `<p class="wpx-note">Loading runs…</p>` : ""}
-      ${studio.error ? `<p class="wpx-note">${esc(studio.error)}</p>` : ""}
-      <div class="wpx-inline">
-        <select id="wpxRun" aria-label="Model run">${runs.map(r => `<option value="${escA(r.id)}"${r.id === P.model.run ? " selected" : ""}>${esc(timeLabel(r.id) || r.id)} run</option>`).join("") || `<option>No runs</option>`}</select>
-        <select id="wpxField" aria-label="Model field">${fields.map(f => `<option value="${escA(f.id)}"${f.id === P.model.field ? " selected" : ""}>${esc(f.label)}</option>`).join("")}</select>
-      </div>
-      <div class="wpx-row"><strong id="wpxModelHour">F${String(P.model.fhr).padStart(2, "0")}</strong><span class="wpx-note">${hours.length ? `${hours.length} hours` : ""}</span></div>
-      <input type="range" id="wpxModelSlider" min="0" max="${Math.max(0, hours.length - 1)}" value="${Math.max(0, hours.indexOf(Number(P.model.fhr)))}" aria-label="Forecast hour"${hours.length ? "" : " disabled"}>
-      <div class="wpx-btnrow"><button class="wpx-btn" data-wpx="studioStep" data-d="-1">‹</button><button class="wpx-btn primary" data-wpx="studioPlay">${studio.playing ? "Pause" : "Play"}</button><button class="wpx-btn" data-wpx="studioStep" data-d="1">›</button><button class="wpx-btn subtle" data-wpx="studioClose">Hide</button></div>
-      <div class="wpx-label">Opacity</div><input type="range" id="wpxModelOpacity" min="20" max="100" value="${Math.round(P.model.opacity * 100)}" aria-label="Model opacity">
-      <p class="wpx-note">Tap the map to probe the value at a point.</p>`;
-  }
-
-  function syncSheetStatus() {
-    const l3 = document.getElementById("wpxL3Status");
-    if (l3 && P.tab === "radar") l3.outerHTML = statusLine();
-    const mrms = document.getElementById("wpxMrmsStatus");
-    if (mrms) {
-      const product = MRMS_PRODUCTS.find(p => p.id === P.mrms.product);
-      mrms.textContent = !product ? "Off" : mrmsLatest.error ? mrmsLatest.error : mrmsLatest.time ? `Valid ${timeLabel(mrmsLatest.time)}` : "Loading latest…";
+  R.addTab({
+    id: "mrms", label: "MRMS", order: 20, body: mrmsBody,
+    onOpen: () => { loadMrmsCatalog().then(() => { mrmsDefaults(); R.refreshTab("mrms"); }).catch(() => {}); },
+    onInput: e => {
+      if (e.target.id === "wpxMrmsOpacity") {
+        P.mrms.opacity = Number(e.target.value) / 100;
+        try { R.map()?.setPaintProperty("wpx-mrms-layer", "raster-opacity", P.mrms.opacity); } catch (_) {}
+        save();
+      }
     }
-    const arm = document.querySelector('[data-wpx="armSounding"]');
-    if (arm) arm.textContent = soundingArmed ? "Tap the map now…" : "Tap map for a sounding";
-  }
+  });
 
-  let routeSearchTimer = 0;
-  function onSheetInput(e) {
-    const t = e.target;
-    if (t.id === "wpxL3Opacity") {
-      P.l3.opacity = Number(t.value) / 100;
-      const label = document.getElementById("wpxL3OpacityValue");
-      if (label) label.textContent = `${t.value}%`;
-      try { radarMap?.setPaintProperty("wpx-l3-layer", "raster-opacity", P.l3.opacity); } catch (_) {}
-      save();
-    } else if (t.id === "wpxMrmsOpacity") {
-      P.mrms.opacity = Number(t.value) / 100;
-      try { radarMap?.setPaintProperty("wpx-mrms-layer", "raster-opacity", P.mrms.opacity); } catch (_) {}
-      save();
-    } else if (t.id === "wpxModelOpacity") {
-      P.model.opacity = Number(t.value) / 100;
-      ["wpx-model-layer", "wpx-model-img-layer"].forEach(id => { try { if (radarMap?.getLayer(id)) radarMap.setPaintProperty(id, "raster-opacity", P.model.opacity); } catch (_) {} });
-      save();
-    } else if (t.id === "wpxRouteFrom" || t.id === "wpxRouteTo") {
-      clearTimeout(routeSearchTimer);
-      const which = t.id === "wpxRouteFrom" ? "fromResults" : "toResults";
-      const q = t.value;
-      routeSearchTimer = setTimeout(async () => {
-        try { route[which] = q.trim().length >= 2 ? await geocode(q) : []; } catch (_) { route[which] = []; }
-        const focusId = t.id, value = q;
-        renderSheet();
-        const input = document.getElementById(focusId);
-        if (input) { input.value = value; input.focus(); }
-      }, 350);
-    } else if (t.id === "wpxModelSlider") {
-      const hours = studio.hours[`${P.model.model}/${P.model.run}`] || [];
-      P.model.fhr = hours[Number(t.value)] ?? P.model.fhr;
-      save();
-      syncStudioChrome();
-      clearTimeout(studio.slideTimer);
-      studio.slideTimer = setTimeout(loadFrame, 180);
-    }
-  }
-
-  function onSheetChange(e) {
-    const t = e.target;
-    if (t.id === "wpxL3On") { P.l3.on = t.checked; save(); applyAll(true); renderSheet(); }
-    else if (t.id === "wpxSite") { P.l3.site = t.value; save(); applyAll(true); renderSheet(); }
-    else if (t.id === "wpxPal") { P.l3.pal = t.value; save(); applyAll(true); renderSheet(); }
-    else if (t.id === "wpxPalFile") { importPaletteFile(t.files && t.files[0]); t.value = ""; }
-    else if (t.id === "wpxGasOn") { P.gas = t.checked; save(); if (P.gas) loadGas(); applyAll(); renderSheet(); }
-    else if (t.id === "wpxShelterOn") { P.shelters = t.checked; save(); if (P.shelters) loadShelters(); applyAll(); renderSheet(); }
-    else if (t.id === "wpxRun") { P.model.run = t.value; save(); loadHours().then(() => { renderSheet(); loadFrame(); }); }
-    else if (t.id === "wpxField") { P.model.field = t.value; save(); loadFrame(); }
-  }
-
+  /* ================================================================ actions */
   Object.assign(X.actions, {
-    openRadar31: () => { if (isSheetOpen()) closeSheet(); else openSheet(); },
+    openRadar31: () => { if (R.isOpen()) R.closeSheet(); else R.openSheet(); },
     r31Open: el => {
       const tab = el.dataset.tab || "radar";
       try { closePage(); } catch (_) {}
       if (state.tab !== "radar") setTab("radar");
-      setTimeout(() => { openSheet(tab); if (tab === "models" && !P.model.on) openStudio(); }, 120);
+      setTimeout(() => { R.openSheet(tab); if (el.dataset.then && X.actions[el.dataset.then]) X.actions[el.dataset.then](el); }, 150);
     },
-    closeSheet: () => closeSheet(),
-    sheetTab: el => { P.tab = el.dataset.tab; save(); if (P.tab === "map") { if (P.gas) loadGas(); if (P.shelters) loadShelters(); } renderSheet(); },
-    nearestSite: () => {
-      const s = sitesByDistance({ latitude: state.location.latitude, longitude: state.location.longitude })[0];
-      if (s) { P.l3.site = s.id; P.l3.on = true; save(); applyAll(true); renderSheet(); say(`Nearest radar: ${s.id}`); }
+    closeSheet: () => R.closeSheet(),
+    sheetTab: el => { P.tab = el.dataset.tab; save(); currentTab()?.onOpen?.(); R.renderSheet(); },
+    l3Fam: el => {
+      P.l3.fam = el.dataset.fam || "";
+      if (!tiltable(P.l3.fam)) P.l3.tilt = "0";
+      save();
+      loadMeta();
+      if (P.l3.fam) loadL3(true); else clearTimeout(L3.timer);
+      R.apply();
+      R.renderSheet();
     },
-    l3Family: el => { P.l3.family = el.dataset.family; if (!familyInfo(P.l3.family).tilts) P.l3.tilt = 0; P.l3.on = true; save(); applyAll(true); renderSheet(); },
-    l3Tilt: el => { P.l3.tilt = Number(el.dataset.tilt) || 0; P.l3.on = true; save(); applyAll(true); renderSheet(); },
-    deletePal: () => { if (P.l3.pal) delete palettes[P.l3.pal]; P.l3.pal = ""; save(); applyAll(true); renderSheet(); },
+    l3Tilt: el => { P.l3.tilt = el.dataset.tilt || "0"; save(); loadL3(true); R.apply(); R.renderSheet(); },
+    palFetch: () => importPaletteLink(document.getElementById("wpxPalUrl")?.value),
+    palApply: () => applyPendingPalette(),
+    palCancel: () => { pal.pending = null; pal.status = ""; R.renderSheet(); },
+    palRemove: el => {
+      const k = el.dataset.k;
+      delete productPalettes()[k];
+      save();
+      say(`${PAL_NAME[k] || k} reset to WeatherPower colors.`);
+      if (P.l3.fam === k) R.apply();
+      R.renderSheet();
+    },
     mrmsProduct: el => {
       P.mrms.product = el.dataset.id || "";
-      const product = MRMS_PRODUCTS.find(p => p.id === P.mrms.product);
-      if (product && !product.windows.map(String).includes(String(P.mrms.window))) P.mrms.window = product.windows[1] ?? product.windows[0];
-      save(); mrmsLatest.for = ""; applyAll(true); renderSheet();
+      const go = () => { mrmsDefaults(); save(); loadMrms(true); R.apply(); R.refreshTab("mrms"); };
+      if (P.mrms.product) { loadMrmsCatalog().then(go, go); R.renderSheet(); } else { clearTimeout(MR.timer); MR.info = null; MR.want = ""; save(); R.apply(); R.renderSheet(); }
     },
-    mrmsWindow: el => { P.mrms.window = el.dataset.w; save(); applyAll(true); renderSheet(); },
-    routeFromHere: () => { route.from = null; route.fromResults = []; renderSheet(); },
-    routePick: el => {
-      const list = el.dataset.which === "from" ? route.fromResults : route.toResults;
-      const item = list[Number(el.dataset.i)];
-      if (!item) return;
-      route[el.dataset.which] = item;
-      route.fromResults = [];
-      route.toResults = [];
-      renderSheet();
-    },
-    routeDepart: el => { route.depart = Number(el.dataset.h) || 0; renderSheet(); },
-    routeGo: () => runRoute(),
-    routeClear: () => { route.geometry = null; route.results = null; route.summary = null; route.rev++; applyAll(); renderSheet(); },
-    armSounding: () => { soundingArmed = !soundingArmed; syncSheetStatus(); if (soundingArmed) say("Tap anywhere on the radar map"); },
-    soundingHere: () => openSounding(state.location.latitude, state.location.longitude),
-    studioOpen: () => openStudio(),
-    studioClose: () => { P.model.on = false; setStudioPlaying(false); save(); applyAll(); renderSheet(); },
-    studioModel: el => { P.model.model = el.dataset.id; save(); studio.frame = null; loadRuns().then(loadHours).then(() => { renderSheet(); loadFrame(); }); renderSheet(); },
-    studioStep: el => { setStudioPlaying(false); stepModel(Number(el.dataset.d)); },
-    studioPlay: () => setStudioPlaying(!studio.playing)
+    mrmsWindow: el => { P.mrms.window = el.dataset.w; save(); loadMrms(true); R.apply(); R.renderSheet(); }
   });
 
-  /* ---------- Hooks into the main radar ---------- */
+  /* ================================================================ hooks into the main radar */
   if (typeof runRadarMapLayerUpdate === "function") {
     const original = runRadarMapLayerUpdate;
     // eslint-disable-next-line no-global-assign
     runRadarMapLayerUpdate = function () {
       const out = original.apply(this, arguments);
-      try { applyAll(); } catch (error) { console.warn("Radar 3.1 layer sync failed", error); }
+      try { R.apply(); } catch (error) { console.warn("Radar 3.1 layer sync failed", error); }
       return out;
     };
   }
-
   if (typeof installRadarMapLayers === "function") {
     const originalInstall = installRadarMapLayers;
     // eslint-disable-next-line no-global-assign
     installRadarMapLayers = function () {
       const out = originalInstall.apply(this, arguments);
-      try { applyAll(); } catch (error) { console.warn("Radar 3.1 layer install failed", error); }
+      try { R.apply(); } catch (error) { console.warn("Radar 3.1 layer install failed", error); }
       return out;
     };
   }
@@ -1150,7 +717,6 @@
     btn.textContent = "3.1";
     bar.prepend(btn);
   }
-
   if (typeof renderRadar === "function") {
     const originalRender = renderRadar;
     // eslint-disable-next-line no-global-assign
@@ -1160,47 +726,25 @@
       return out;
     };
   }
-
   if (typeof setTab === "function") {
     const originalSetTab = setTab;
     // eslint-disable-next-line no-global-assign
     setTab = function (tab) {
-      if (tab !== "radar") closeSheet();
+      if (tab !== "radar") R.closeSheet();
       const out = originalSetTab.apply(this, arguments);
       try { injectButton(); } catch (_) {}
       return out;
     };
   }
   injectButton();
+  if (P.l3.fam) loadMeta();
+  if (P.mrms.product) loadMrmsCatalog().then(() => { mrmsDefaults(); loadMrms(true); }).catch(() => loadMrms(true));
 
-  // Keep site/MRMS scans fresh while radar is on screen.
-  setInterval(() => {
-    if (document.visibilityState === "hidden" || state.tab !== "radar") return;
-    if (P.l3.on || P.mrms.product) applyAll(true);
-  }, 120000);
-
-  if (P.gas) loadGas();
-  if (P.shelters) loadShelters();
-
+  /* ================================================================ API for the TV shell */
   X.radar = {
-    L3_FAMILIES, MRMS_PRODUCTS, icaoFor, loadSites, sitesByDistance, l3Code, currentSite,
-    l3Template: async (site, code) => {
-      try {
-        const json = await getJson(API.radarLatest(site, code), { label: "Latest radar scan" });
-        const key = String(pick(json, ["key", "id", "scan_key", "file"], ""));
-        const template = pick(json, ["tiles", "tile_url", "tileUrl", "template"], "");
-        return { tiles: template ? absolute(Array.isArray(template) ? template[0] : template) : key ? API.radarTile(key, "") : API.radarLive(site, code, ""), time: pick(json, ["time", "valid", "valid_time", "scan_time", "timestamp"], "") };
-      } catch (_) {
-        return { tiles: `${API.radarLive(site, code, "")}?v=${Math.floor(Date.now() / 120000)}`, time: "" };
-      }
-    },
-    mrmsTemplate: async (product, windowMin) => {
-      const json = await getJson(API.mrmsLatest(product, windowMin), { label: "MRMS latest" });
-      const key = String(pick(json, ["key", "id", "file"], ""));
-      const template = pick(json, ["tiles", "tile_url", "tileUrl", "template"], "");
-      return { tiles: template ? absolute(Array.isArray(template) ? template[0] : template) : key ? API.mrmsTile(key) : "", time: pick(json, ["time", "valid", "valid_time", "timestamp"], "") };
-    },
-    studio: { MODELS, FALLBACK_FIELDS, loadRuns, loadHours, fetchFrameSpec, drawFrame, prefs: P.model, state: studio, fieldLabel },
-    openSheet, closeSheet, openSounding
+    FAMILIES, DEF_WINDOW, displayId, loadMeta, sitesByDistance, latest,
+    l3Tiles: (info, fam) => API.radarTile(info.key, palSpec(fam)),
+    mrmsLatest: (product, windowKey = DEF_WINDOW[product]) => getJson(API.mrmsLatest(product, windowKey), { label: "MRMS latest" })
+      .then(j => { if (!j.key) throw new Error("No MRMS scan is available right now"); return { info: j, tiles: API.mrmsTile(j.key) }; })
   };
 })();

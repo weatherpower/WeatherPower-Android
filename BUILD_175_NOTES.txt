@@ -4,18 +4,25 @@ Version name: 1.8.0
 Version code: 175
 
 Radar 3.1 (phone) — tap the "3.1" button on the Radar tab, or More > Radar 3.1 & Tropics
-- Level III site products from the WeatherPower render service: any NEXRAD site,
-  REF/VEL/SRV/CC/ZDR/KDP (tilts 1–4), Echo Tops, Digital VIL (+ any extra products /api/radar/products lists)
-- MRMS hail (MESH), rotation 0–2 km / 3–6 km, rainfall with accumulation windows; tap map for point values
-- Gas stations (WeatherPower feed + EIA weekly averages), tornado shelters
-- Route weather: OSRM driving route, NWS hourly forecast at your ETA + active alerts at each stop
-- Point soundings: HRRR skew-T image (0–18 h) + parameters from the sounding API
-- Model Studio: HRRR / NAM / GFS / ECMWF runs, fields, hour playback, tap-to-probe
-- Palette import: GR2Analyst / GR Level 3 / RadarScope .pal files (sent to the render service as ?pal=)
+- Radar products (WeatherPower render service /api/radar): high-res reflectivity, velocity, storm-relative
+  velocity, CC, ZDR, KDP, hydrometeor classification (tilts 1–4), echo tops, VIL; site = nearest to map center
+  or any NEXRAD site; status shows scan time/age and flags a radar that may be down
+- Color tables: GR2Analyst / GRLevel3 / WxTools / RadarScope / JSON palettes from a file or a Drive, Dropbox or
+  GitHub link (via /api/palette-fetch), per product, with unit conversion (mph/m·s⁻¹ → kt, % → CC, km → kft)
+- MRMS storm damage layers: hail swath, low/mid-level rotation tracks, rainfall totals with the server's time
+  windows; tap the map for the NOAA MRMS value
+- Model Studio: HRRR / NAM / GFS / ECMWF from /api/models (catalog, runs, on-demand hours), playback,
+  MSLP / 500 mb contours, tap for values
+- Point soundings: Skew-T + hodograph from the HRRR profile or the nearest NWS balloon, or the SounderPy image
+- Gas stations (every U.S. station, EIA weekly area prices) and public tornado shelters (capacity classes)
+- Route weather: Mapbox driving route, NWS forecast at your arrival time and alerts along the way, gas and
+  shelters near the route
 
 Tropical Storm Center (More > Tropical Storm Center)
-- Active storms (NHC CurrentStorms.json): intensity, category, pressure, motion, position, advisory time
-- Cones, forecast tracks/points, past tracks, coastal watches/warnings, 7-day outlook (NHC MapServer)
+- Active storms from the NHC GIS forecast points (intensity, category, gusts, pressure, motion, position,
+  advisory number/time) with public advisory and discussion links from NHC CurrentStorms.json
+- Cones, forecast tracks/points, past tracks, coastal watches/warnings and the 7-day outlook (NHC MapServer,
+  same layers as the Radar 3.1 website)
 - GOES-19/GOES-18 sector imagery and storm floaters (NOAA/NESDIS STAR)
 
 Android TV
@@ -26,17 +33,19 @@ Android TV
 - Test on an emulator: Android Studio > Device Manager > Television (1080p) image, install the debug APK.
 
 Code layout
-- app/src/main/assets/wp-core.js      shared helpers + ALL WeatherPower server paths (API object)
-- app/src/main/assets/wp-radar31.js   Radar 3.1 tools on the existing radar map
+- app/src/main/assets/wp-core.js      shared helpers + every WeatherPower server path (API object)
+- app/src/main/assets/wp-radar31.js   Radar 3.1 sheet framework, radar products, color tables, MRMS
+- app/src/main/assets/wp-studio.js    Model Studio engine (phone + TV) and point soundings
+- app/src/main/assets/wp-travel.js    gas stations, tornado shelters, route weather
 - app/src/main/assets/wp-tropical.js  Tropical Storm Center
 - app/src/main/assets/wp-tv.js        Android TV shell
 - app/src/main/assets/wp-extras.css   styles for all of the above
 - MainActivity: TV detection bridge (isTelevision, setKeepScreenOn), JS-aware Back, media/menu keys,
-  non-image file picker for .pal, external links open in the browser
+  non-image file picker for palettes, external links open in the browser
 
-Server paths to verify against the Radar 3.1 reference blocks (edit the API object in wp-core.js if different):
-- /api/radar/tile/<key>/…, /api/radar/live/<SITE>/<PRODUCT>/…, /api/mrms/tile/<key>/…
-- /api/models/hours/<model>/<run>, /api/models/frame/<model>/<run>/<field>/<fhr>, /api/models/probe/…
-- the ?pal= value (currently base64url of the .pal text without comments)
+Server contract: matches the Radar 3.1 web blocks (radar-3.1-model-studio.html): /api/radar (3-letter site
+ids), /api/mrms, /api/models, /api/sounding, /wpcc-api/sounding, /gas/dots.js + /gas/t/<lat>_<lon>.js,
+/data/tornado-shelters.json, /api/palette-fetch. After changing any wp-* file, bump its ?v= in index.html
+(the service worker caches these files by URL).
 
 CI: .github/workflows/android-debug.yml builds a debug APK on every push and uploads it as an artifact.

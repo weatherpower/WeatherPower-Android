@@ -1,175 +1,140 @@
 /* WeatherPower Tropical Storm Center.
- * Active storms (NHC CurrentStorms.json), forecast cones, tracks, watches/warnings, past tracks and the
- * 7-day tropical weather outlook from the NHC MapServer, plus GOES imagery from NOAA STAR. */
+ * Cones, forecast tracks and points, past tracks, coastal watches/warnings and the 7-day tropical weather
+ * outlook from the official NHC GIS service (NOAA/NWS NHC_tropical_weather MapServer), the same layers the
+ * Radar 3.1 website uses; advisory links from NHC CurrentStorms.json; GOES imagery from NOAA/NESDIS STAR. */
 (function () {
   "use strict";
   const X = window.WPX;
   if (!X) return;
-  const { API, esc, escA, say, getJson, pick, num, timeLabel, compass, fc } = X;
+  const { API, esc, escA, getJson, num, compass, fc } = X;
   const MS = API.nhcMapServer;
 
+  // Forecast Points layer id per storm slot; the slot's other layers are fixed offsets from it.
+  const BINS = { AT1: 6, AT2: 32, AT3: 58, AT4: 84, AT5: 110, EP1: 136, EP2: 162, EP3: 188, EP4: 214, EP5: 240, CP1: 266, CP2: 292, CP3: 318, CP4: 344, CP5: 370 };
+  const OFFSET = { track: 1, cone: 2, ww: 3, pastPts: 5, pastTrack: 6 };
+  const OUTLOOK = { areas: 3, points: 2 };
+  const REFRESH = 10 * 60e3;
+  const WW = { HWR: ["Hurricane Warning", "#ff2a2a", 6], HWA: ["Hurricane Watch", "#ff8fd8", 5], TWR: ["Tropical Storm Warning", "#2f7bff", 5], TWA: ["Tropical Storm Watch", "#ffd21f", 4] };
+  const RISK = { Low: "#ffd21f", Medium: "#ff9a1f", High: "#ff3b3b" };
+  const TYPE_NAMES = { TD: "Tropical Depression", TS: "Tropical Storm", HU: "Hurricane", MH: "Major Hurricane", SD: "Subtropical Depression", SS: "Subtropical Storm", STD: "Subtropical Depression", STS: "Subtropical Storm", PTC: "Potential Tropical Cyclone", PT: "Post-Tropical Cyclone", PC: "Post-Tropical Cyclone", EX: "Extratropical", LO: "Low", DB: "Disturbance", WV: "Tropical Wave", RL: "Remnant Low" };
+
   const T = {
-    storms: [], stormsError: "", stormsLoaded: false,
-    layers: null, layersError: "",
-    geo: {}, // bin -> {cone, track, points, ww, pastTrack, pastPoints}
-    outlook: { areas7: null, points7: null, areas2: null, error: "" },
-    selected: "",
-    tab: "storms",
-    show: { cone: true, track: true, points: true, past: true, ww: true, outlook: true },
-    map: null, body: null, loading: false, fetchedAt: 0, tv: false
+    storms: [], bins: {}, outlook: { areas: fc([]), points: fc([]) }, cs: {},
+    error: "", loaded: false, loading: false, fetchedAt: 0, timer: 0,
+    selected: "", tab: "storms", map: null, body: null, tv: false,
+    show: { cone: true, track: true, points: true, past: true, ww: true, outlook: true }
   };
   X.prefs.tropical = Object.assign({ show: T.show }, X.prefs.tropical || {});
   T.show = Object.assign({}, T.show, X.prefs.tropical.show || {});
 
-  const CLASS_NAMES = { TD: "Tropical Depression", TS: "Tropical Storm", HU: "Hurricane", MH: "Major Hurricane", STD: "Subtropical Depression", STS: "Subtropical Storm", PTC: "Potential Tropical Cyclone", PC: "Post-Tropical Cyclone", TY: "Typhoon", LO: "Low", DB: "Disturbance", RL: "Remnant Low", EX: "Extratropical" };
-  const WW_COLORS = { HWR: "#ff1a1a", HWA: "#ff9ecf", TWR: "#1e6bff", TWA: "#ffd400", SSW: "#b537f2", SSA: "#e8a6ff" };
-  const WW_NAMES = { HWR: "Hurricane Warning", HWA: "Hurricane Watch", TWR: "Tropical Storm Warning", TWA: "Tropical Storm Watch", SSW: "Storm Surge Warning", SSA: "Storm Surge Watch" };
-  const RISK_COLORS = { low: "#ffd84d", medium: "#ff8f29", high: "#ff2d2d" };
-
-  const ktToMph = kt => Math.round(kt * 1.15078);
+  function colorFor(kt, type) {
+    type = String(type || "").toUpperCase();
+    if (/^(EX|PT|LO|DB|WV|PTC)/.test(type) && !(kt >= 34)) return "#b9c1cf";
+    if (!(kt >= 34)) return "#5ebaff";   // depression
+    if (kt < 64) return "#00e6d8";       // tropical storm
+    if (kt < 83) return "#ffffa8";       // cat 1
+    if (kt < 96) return "#ffe066";       // cat 2
+    if (kt < 113) return "#ffb340";      // cat 3
+    if (kt < 137) return "#ff7a1f";      // cat 4
+    return "#ff4d6d";                    // cat 5
+  }
+  function letterFor(p) {
+    const kt = Number(p.maxwind), t = String(p.stormtype || "").toUpperCase();
+    if (/^(HU|MH)/.test(t) || kt >= 64) return String(p.ssnum > 0 ? Math.round(p.ssnum) : kt >= 137 ? 5 : kt >= 113 ? 4 : kt >= 96 ? 3 : kt >= 83 ? 2 : 1);
+    if (/^(EX|PT|LO|PTC)/.test(t)) return "L";
+    if (/^(TS|SS)/.test(t) || kt >= 34) return "S";
+    return "D";
+  }
+  const mph = kt => (Number.isFinite(Number(kt)) && Number(kt) < 999 ? `${Math.round(Number(kt) * 1.15078)} mph` : "—");
   function category(kt) {
-    if (kt === null) return "";
-    if (kt >= 137) return "Category 5";
-    if (kt >= 113) return "Category 4";
-    if (kt >= 96) return "Category 3";
-    if (kt >= 83) return "Category 2";
-    if (kt >= 64) return "Category 1";
-    if (kt >= 34) return "Tropical storm force";
-    return "Depression strength";
+    if (!(kt >= 34)) return "Depression strength";
+    if (kt < 64) return "Tropical storm force";
+    return `Category ${kt >= 137 ? 5 : kt >= 113 ? 4 : kt >= 96 ? 3 : kt >= 83 ? 2 : 1}`;
   }
-  function stormColor(kt) {
-    if (kt === null) return "#9db4bb";
-    if (kt >= 113) return "#ff2d7a";
-    if (kt >= 96) return "#ff3b3b";
-    if (kt >= 83) return "#ff8a3d";
-    if (kt >= 64) return "#ffc53d";
-    if (kt >= 34) return "#3ddc84";
-    return "#52c8ff";
-  }
+  const titleCase = s => (/^[A-Z\s-]+$/.test(s) ? s.toLowerCase().replace(/\b[a-z]/g, c => c.toUpperCase()) : s);
 
   /* ---------- Data ---------- */
-  async function loadStorms() {
+  // NHC layers return lowercase field names; normalize so the rest of the code never guesses case.
+  function lower(collection) {
+    const features = (collection && collection.features) || [];
+    return fc(features.map(f => {
+      const props = {};
+      Object.keys(f.properties || {}).forEach(k => { props[k.toLowerCase()] = f.properties[k]; });
+      return { type: "Feature", geometry: f.geometry, properties: props };
+    }));
+  }
+  const q = id => getJson(`${MS}/${id}/query?where=1%3D1&outFields=*&outSR=4326&f=geojson`, { label: "NHC layer", timeoutMs: 20000 }).then(lower);
+
+  async function loadCurrentStorms() {
     try {
       const json = await getJson(API.nhcCurrentStorms(), { label: "NHC current storms", preferNative: !!window.WeatherPowerAndroid });
-      T.storms = (json.activeStorms || []).map(s => ({
-        id: String(s.id || "").toUpperCase(),
-        bin: String(s.binNumber || "").toUpperCase(),
-        name: s.name || "Unnamed",
-        cls: String(s.classification || "").toUpperCase(),
-        kt: num(s.intensity),
-        mb: num(s.pressure),
-        lat: num(s.latitudeNumeric),
-        lon: num(s.longitudeNumeric),
-        latText: s.latitude || "", lonText: s.longitude || "",
-        dir: num(s.movementDir), speed: num(s.movementSpeed),
-        updated: s.lastUpdate || "",
-        advisory: s.publicAdvisory || null,
-        discussion: s.forecastDiscussion || null,
-        graphics: s.forecastGraphics || null
-      }));
-      T.stormsError = "";
-    } catch (error) {
-      T.storms = [];
-      T.stormsError = `NHC storm list unavailable (${error.message || error}).`;
-    }
-    T.stormsLoaded = true;
+      const out = {};
+      (json.activeStorms || []).forEach(s => { if (s.binNumber) out[String(s.binNumber).toUpperCase()] = s; });
+      T.cs = out;
+    } catch (_) { /* advisory links are optional; the map layers carry the storm data */ }
   }
 
-  async function loadLayerIndex() {
-    if (T.layers) return T.layers;
-    const json = await getJson(`${MS}?f=json`, { label: "NHC map service" });
-    const layers = json.layers || [];
-    const byId = new Map(layers.map(l => [l.id, l]));
-    const path = l => {
-      const names = [];
-      let cur = l, guard = 0;
-      while (cur && guard++ < 8) { names.unshift(cur.name || ""); cur = cur.parentLayerId >= 0 ? byId.get(cur.parentLayerId) : null; }
-      return names.join(" / ");
+  async function load() {
+    const outlook = Promise.all([q(OUTLOOK.areas), q(OUTLOOK.points)]).catch(() => [fc([]), fc([])]);
+    const cs = loadCurrentStorms();
+    let failures = 0;
+    const bins = await Promise.all(Object.keys(BINS).map(bin => q(BINS[bin]).then(pts => {
+      if (!pts.features.length) return null;
+      const id = BINS[bin];
+      const parts = Object.keys(OFFSET);
+      return Promise.all(parts.map(k => q(id + OFFSET[k]).catch(() => fc([])))).then(res => {
+        const d = { bin, pts };
+        parts.forEach((k, i) => { d[k] = res[i]; });
+        return d;
+      });
+    }).catch(() => { failures++; return null; })));
+    const [ol] = await Promise.all([outlook, cs]);
+    T.outlook = { areas: ol[0], points: ol[1] };
+    T.bins = {};
+    bins.filter(Boolean).forEach(d => { T.bins[d.bin] = d; });
+    T.storms = Object.values(T.bins).map(stormFromBin).filter(Boolean);
+    T.error = failures === Object.keys(BINS).length ? "The NHC map service could not be reached. Check your connection and refresh." : "";
+    T.loaded = true;
+  }
+
+  function stormFromBin(d) {
+    const pts = d.pts.features.slice().sort((a, b) => Number(a.properties.tau) - Number(b.properties.tau));
+    if (!pts.length) return null;
+    const p0 = pts[0].properties, c = pts[0].geometry && pts[0].geometry.coordinates;
+    const cs = T.cs[d.bin] || null;
+    const type = String(p0.stormtype || "").toUpperCase();
+    return {
+      bin: d.bin,
+      id: cs && cs.id ? String(cs.id).toUpperCase() : `${p0.basin || ""}${p0.stormnum || ""}${p0.year || ""}`.toUpperCase(),
+      name: titleCase(String((cs && cs.name) || p0.stormname || d.bin)),
+      kind: p0.tcdvlp || TYPE_NAMES[type] || type,
+      type, p0,
+      kt: num(p0.maxwind), gust: num(p0.gust),
+      mb: num(p0.mslp) !== null && num(p0.mslp) < 9999 ? num(p0.mslp) : null,
+      dir: num(p0.tcdir), spdKt: num(p0.tcspd) !== null && num(p0.tcspd) < 9999 ? num(p0.tcspd) : null,
+      lat: c ? c[1] : null, lon: c ? c[0] : null,
+      advNum: p0.advisnum || (cs && cs.publicAdvisory && cs.publicAdvisory.advNum) || "",
+      advDate: p0.advdate || (cs && cs.publicAdvisory && cs.publicAdvisory.issuance) || "",
+      advUrl: cs && cs.publicAdvisory ? cs.publicAdvisory.url : "",
+      discUrl: cs && cs.forecastDiscussion ? cs.forecastDiscussion.url : "",
+      forecast: pts.map(f => f.properties)
     };
-    const out = { bins: {}, outlook: {} };
-    layers.filter(l => !(l.subLayerIds && l.subLayerIds.length)).forEach(l => {
-      const full = path(l);
-      const name = String(l.name || "");
-      if (/wind|prob|surge|arrival|swath|radii|inundation/i.test(full)) return;
-      const bin = full.match(/\b(AT|EP|CP)\s*-?\s*([1-5])\b/i);
-      if (!bin) {
-        if (!/outlook/i.test(full)) return;
-        const seven = /(7|seven)[\s-]*day/i.test(full);
-        const two = /(2|two)[\s-]*day/i.test(full);
-        const kind = /point/i.test(name) ? "points" : /line/i.test(name) ? "lines" : "areas";
-        if (seven) out.outlook[`${kind}7`] = out.outlook[`${kind}7`] ?? l.id;
-        else if (two) out.outlook[`${kind}2`] = out.outlook[`${kind}2`] ?? l.id;
-        return;
-      }
-      const key = `${bin[1]}${bin[2]}`.toUpperCase();
-      const b = out.bins[key] = out.bins[key] || {};
-      const past = /past|observed|best track|previous/i.test(full);
-      if (/cone/i.test(name)) b.cone = l.id;
-      else if (/watch|warning/i.test(name)) b.ww = l.id;
-      else if (past && /track|line/i.test(name)) b.pastTrack = l.id;
-      else if (past && /point|position/i.test(name)) b.pastPoints = l.id;
-      else if (/track|line/i.test(name)) b.track = b.track ?? l.id;
-      else if (/point|position/i.test(name)) b.points = b.points ?? l.id;
-    });
-    T.layers = out;
-    return out;
-  }
-
-  const queryUrl = id => `${MS}/${id}/query?where=1%3D1&outFields=*&returnGeometry=true&outSR=4326&f=geojson`;
-  async function queryLayer(id) {
-    if (id === undefined || id === null) return fc([]);
-    try {
-      const json = await getJson(queryUrl(id), { label: "NHC layer", timeoutMs: 20000 });
-      return json && json.type === "FeatureCollection" ? json : fc([]);
-    } catch (error) {
-      console.warn("NHC layer query failed", id, error);
-      return fc([]);
-    }
-  }
-
-  async function loadGeometry() {
-    try {
-      await loadLayerIndex();
-      T.layersError = "";
-    } catch (error) {
-      T.layersError = `NHC map layers unavailable (${error.message || error}); showing the NHC map image instead.`;
-      return;
-    }
-    // Storm list may be down: fall back to scanning every storm slot's forecast points.
-    let bins = T.storms.map(s => s.bin).filter(Boolean);
-    if (!T.storms.length) bins = Object.keys(T.layers.bins);
-    await Promise.all(bins.map(async bin => {
-      const ids = T.layers.bins[bin];
-      if (!ids) return;
-      const [cone, track, points, ww, pastTrack, pastPoints] = await Promise.all([ids.cone, ids.track, ids.points, ids.ww, ids.pastTrack, ids.pastPoints].map(queryLayer));
-      T.geo[bin] = { cone, track, points, ww, pastTrack, pastPoints };
-    }));
-    if (!T.storms.length) {
-      T.storms = Object.entries(T.geo).map(([bin, g]) => {
-        const first = (g.points.features || []).map(f => f.properties || {}).sort((a, b) => num(a.TAU) - num(b.TAU))[0];
-        if (!first) return null;
-        const coords = (g.points.features || []).find(f => f.properties === first)?.geometry?.coordinates || [];
-        return { id: `${first.BASIN || ""}${first.STORMNUM || ""}`, bin, name: first.STORMNAME || "Storm", cls: String(first.STORMTYPE || "").toUpperCase(), kt: num(first.MAXWIND), mb: num(first.MSLP), lat: num(first.LAT ?? coords[1]), lon: num(first.LON ?? coords[0]), dir: num(first.TCDIR), speed: num(first.TCSPD), speedKt: true, updated: first.ADVDATE || "", advisory: first.ADVISNUM ? { advNum: first.ADVISNUM, issuance: first.ADVDATE } : null };
-      }).filter(Boolean);
-    }
-    const o = T.layers.outlook;
-    const [areas7, points7, areas2] = await Promise.all([o.areas7, o.points7, o.areas2].map(queryLayer));
-    T.outlook = { areas7, points7, areas2, error: "" };
   }
 
   async function refresh(force) {
     if (T.loading) return;
-    if (!force && T.fetchedAt && Date.now() - T.fetchedAt < 5 * 60000) { draw(); return; }
+    clearTimeout(T.timer);
+    T.timer = setTimeout(() => { if (T.body) refresh(true); }, REFRESH);
+    if (!force && T.fetchedAt && Date.now() - T.fetchedAt < 5 * 60000) { draw(); drawMap(); return; }
     T.loading = true;
     draw();
-    await loadStorms();
-    draw();
-    await loadGeometry();
+    try { await load(); } catch (error) { T.error = `NHC data unavailable: ${error.message || error}`; }
     T.fetchedAt = Date.now();
     T.loading = false;
     draw();
     drawMap();
     fitStorms();
+    try { if (typeof renderMore === "function") renderMore(); } catch (_) {}
   }
 
   /* ---------- Map ---------- */
@@ -179,61 +144,75 @@
     T.map.addControl(new maplibregl.AttributionControl({ compact: true, customAttribution: "NOAA/NHC" }), "bottom-right");
     T.map.on("load", () => { drawMap(); fitStorms(); });
     T.map.on("click", event => {
-      const layers = ["wpx-trop-pts", "wpx-trop-cone", "wpx-trop-otlk"].filter(id => T.map.getLayer(id));
-      const hit = T.map.queryRenderedFeatures(event.point, { layers })[0];
+      const map = T.map;
+      const layers = ["wpx-trop-pts", "wpx-trop-ww", "wpx-trop-otlk", "wpx-trop-otlkpt"].filter(id => map.getLayer(id));
+      const hit = map.queryRenderedFeatures([[event.point.x - 6, event.point.y - 6], [event.point.x + 6, event.point.y + 6]], { layers })[0];
       if (!hit) return;
       const p = hit.properties || {};
-      if (p.__bin) { select(p.__bin); return; }
-      if (hit.layer.id === "wpx-trop-otlk") {
-        new maplibregl.Popup({ className: "wpx-popup" }).setLngLat(event.lngLat).setHTML(`<strong>Tropical outlook area</strong><br>2-day: ${esc(p.PROB2DAY || p.prob2day || "--")} · 7-day: ${esc(p.PROB7DAY || p.prob7day || "--")}<br><small>${esc(p.RISK7DAY || p.risk7day || "")} chance of formation</small>`).addTo(T.map);
+      let html = "";
+      if (hit.layer.id === "wpx-trop-pts") {
+        const s = T.storms.find(x => x.bin === p.__bin);
+        const now = Number(p.tau) === 0;
+        html = `<strong>${esc(s ? s.name : p.stormname || "")}</strong><br><small>${esc(p.tcdvlp || p.stormtype || "")} · ${now ? "Current position" : `Forecast +${esc(p.tau)}h`} · ${esc(p.datelbl || "")}</small>
+          <div class="wpx-gas-grid"><div><small>Max wind</small><b>${esc(mph(p.maxwind))}</b></div><div><small>Gusts</small><b>${esc(mph(p.gust))}</b></div>${p.mslp && Number(p.mslp) < 9999 ? `<div><small>Pressure</small><b>${esc(p.mslp)} mb</b></div>` : ""}${p.tcspd && Number(p.tcspd) < 9999 ? `<div><small>Moving</small><b>${Math.round(Number(p.tcspd) * 1.15078)} mph · ${esc(p.tcdir)}°</b></div>` : ""}</div>
+          <small>NHC advisory ${esc(p.advisnum || "")} · ${esc(p.advdate || "")}</small>`;
+        if (s) setTimeout(() => select(s.bin, true), 0);
+      } else if (hit.layer.id === "wpx-trop-ww") {
+        const w = WW[p.tcww];
+        html = `<strong>${esc(w ? w[0] : p.tcww || "Watch/Warning")}</strong>${p.__bin ? `<br><small>${esc((T.storms.find(x => x.bin === p.__bin) || {}).name || "")}</small>` : ""}`;
+      } else {
+        html = `<strong>NHC 7-day outlook</strong>${p.basin ? ` · ${esc(p.basin)}` : ""}<br>2-day: ${esc(p.prob2day || "--")} (${esc(p.risk2day || "")}) · 7-day: ${esc(p.prob7day || "--")} (${esc(p.risk7day || "")})`;
       }
+      try { new maplibregl.Popup({ className: "wpx-popup", maxWidth: "290px" }).setLngLat(event.lngLat).setHTML(html).addTo(map); } catch (_) {}
     });
   }
 
   function tagged(collection, bin) {
-    return (collection?.features || []).map(f => Object.assign({}, f, { properties: Object.assign({ __bin: bin }, f.properties || {}) }));
+    return ((collection && collection.features) || []).map(f => ({ type: "Feature", geometry: f.geometry, properties: Object.assign({ __bin: bin }, f.properties) }));
   }
 
   function drawMap() {
     const map = T.map;
     if (!map) return;
     if (!X.mapReady(map)) { map.once("idle", drawMap); return; }
-    const layerOk = !T.layersError;
-    // Service-image fallback when the layer index could not be read.
-    if (!layerOk) {
-      X.setRaster(map, "wpx-trop-img", [`${MS}/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=512,512&format=png32&transparent=true&f=image`], { opacity: 0.9, resampling: "linear", attribution: "NOAA/NHC" });
-      return;
-    }
-    X.removeLayerAndSource(map, "wpx-trop-img");
-    const bins = Object.keys(T.geo);
-    const all = key => fc(bins.flatMap(bin => tagged(T.geo[bin][key], bin)));
-    const outlook = fc([].concat(T.outlook.areas7?.features || []));
-    const outlookPts = fc([].concat(T.outlook.points7?.features || []));
-    const sets = [
-      ["wpx-trop-otlk-src", T.show.outlook ? outlook : fc([])],
-      ["wpx-trop-otlkpt-src", T.show.outlook ? outlookPts : fc([])],
-      ["wpx-trop-cone-src", T.show.cone ? all("cone") : fc([])],
-      ["wpx-trop-ww-src", T.show.ww ? all("ww") : fc([])],
-      ["wpx-trop-past-src", T.show.past ? all("pastTrack") : fc([])],
-      ["wpx-trop-track-src", T.show.track ? all("track") : fc([])],
-      ["wpx-trop-pts-src", T.show.points ? all("points") : fc([])]
-    ];
-    sets.forEach(([id, data]) => X.setGeoJson(map, id, data));
-    const riskExpr = key => ["match", ["downcase", ["to-string", ["coalesce", ["get", key], ["get", key.toLowerCase()], ""]]], "high", RISK_COLORS.high, "medium", RISK_COLORS.medium, RISK_COLORS.low];
-    X.addLayerOnce(map, { id: "wpx-trop-otlk", type: "fill", source: "wpx-trop-otlk-src", paint: { "fill-color": riskExpr("RISK7DAY"), "fill-opacity": 0.28 } });
-    X.addLayerOnce(map, { id: "wpx-trop-otlk-line", type: "line", source: "wpx-trop-otlk-src", paint: { "line-color": riskExpr("RISK7DAY"), "line-width": 2 } });
-    X.addLayerOnce(map, { id: "wpx-trop-otlkpt", type: "symbol", source: "wpx-trop-otlkpt-src", layout: { "text-field": "×", "text-size": 26, "text-allow-overlap": true }, paint: { "text-color": riskExpr("RISK7DAY"), "text-halo-color": "#000", "text-halo-width": 1 } });
-    X.addLayerOnce(map, { id: "wpx-trop-cone", type: "fill", source: "wpx-trop-cone-src", paint: { "fill-color": "#ffffff", "fill-opacity": 0.22 } });
-    X.addLayerOnce(map, { id: "wpx-trop-cone-line", type: "line", source: "wpx-trop-cone-src", paint: { "line-color": "#ffffff", "line-width": 1.5, "line-opacity": 0.8 } });
-    X.addLayerOnce(map, { id: "wpx-trop-ww", type: "line", source: "wpx-trop-ww-src", layout: { "line-cap": "round" }, paint: { "line-color": ["match", ["get", "TCWW"], "HWR", WW_COLORS.HWR, "HWA", WW_COLORS.HWA, "TWR", WW_COLORS.TWR, "TWA", WW_COLORS.TWA, "SSW", WW_COLORS.SSW, "SSA", WW_COLORS.SSA, "#ffffff"], "line-width": 6 } });
-    X.addLayerOnce(map, { id: "wpx-trop-past", type: "line", source: "wpx-trop-past-src", paint: { "line-color": "#c0c8d0", "line-width": 2, "line-dasharray": [2, 1.5] } });
-    X.addLayerOnce(map, { id: "wpx-trop-track", type: "line", source: "wpx-trop-track-src", paint: { "line-color": "#111", "line-width": 2.5 } });
-    X.addLayerOnce(map, { id: "wpx-trop-pts", type: "circle", source: "wpx-trop-pts-src", paint: { "circle-radius": 7, "circle-color": ["interpolate", ["linear"], ["to-number", ["get", "MAXWIND"], 0], 0, "#52c8ff", 34, "#3ddc84", 64, "#ffc53d", 83, "#ff8a3d", 96, "#ff3b3b", 113, "#ff2d7a"], "circle-stroke-color": "#08101f", "circle-stroke-width": 1.5 } });
-    X.addLayerOnce(map, { id: "wpx-trop-pts-lbl", type: "symbol", source: "wpx-trop-pts-src", layout: { "text-field": ["coalesce", ["get", "DVLBL"], ""], "text-size": 10, "text-allow-overlap": true }, paint: { "text-color": "#08101f" } });
-    X.setGeoJson(map, "wpx-trop-now-src", fc(T.storms.filter(s => s.lat !== null && s.lon !== null).map(s => ({ type: "Feature", geometry: { type: "Point", coordinates: [s.lon, s.lat] }, properties: { __bin: s.bin, name: s.name, color: stormColor(s.kt) } }))));
-    X.addLayerOnce(map, { id: "wpx-trop-now", type: "symbol", source: "wpx-trop-now-src", layout: { "text-field": ["get", "name"], "text-size": 13, "text-offset": [0, -1.4], "text-allow-overlap": true }, paint: { "text-color": "#ffffff", "text-halo-color": "#000", "text-halo-width": 1.5 } });
+    const bins = Object.keys(T.bins);
+    const all = key => fc(bins.flatMap(bin => tagged(T.bins[bin][key], bin)));
+    const pts = fc(bins.flatMap(bin => tagged(T.bins[bin].pts, bin).map(f => Object.assign(f, { properties: Object.assign(f.properties, { __color: colorFor(Number(f.properties.maxwind), f.properties.stormtype), __letter: letterFor(f.properties), __now: Number(f.properties.tau) === 0 }) }))));
+    const pastPts = fc(bins.flatMap(bin => tagged(T.bins[bin].pastPts, bin).map(f => Object.assign(f, { properties: Object.assign(f.properties, { __color: colorFor(Number(f.properties.intensity), f.properties.stormtype) }) }))));
+    const set = (id, data, on) => X.setGeoJson(map, id, on ? data : fc([]));
+    set("wpx-trop-otlk-src", T.outlook.areas, T.show.outlook);
+    set("wpx-trop-otlkpt-src", T.outlook.points, T.show.outlook);
+    set("wpx-trop-cone-src", all("cone"), T.show.cone);
+    set("wpx-trop-ww-src", all("ww"), T.show.ww);
+    set("wpx-trop-past-src", all("pastTrack"), T.show.past);
+    set("wpx-trop-pastpt-src", pastPts, T.show.past);
+    set("wpx-trop-track-src", all("track"), T.show.track);
+    set("wpx-trop-pts-src", pts, T.show.points);
+    const risk = key => ["match", ["get", key], "High", RISK.High, "Medium", RISK.Medium, RISK.Low];
+    X.addLayerOnce(map, { id: "wpx-trop-otlk", type: "fill", source: "wpx-trop-otlk-src", paint: { "fill-color": risk("risk7day"), "fill-opacity": 0.14 } });
+    X.addLayerOnce(map, { id: "wpx-trop-otlk-line", type: "line", source: "wpx-trop-otlk-src", paint: { "line-color": risk("risk7day"), "line-width": 2, "line-dasharray": [2.5, 2.5] } });
+    X.addLayerOnce(map, { id: "wpx-trop-otlkpt", type: "symbol", source: "wpx-trop-otlkpt-src", layout: { "text-field": "×", "text-size": 28, "text-allow-overlap": true }, paint: { "text-color": risk("risk2day"), "text-halo-color": "#000", "text-halo-width": 1 } });
+    X.addLayerOnce(map, { id: "wpx-trop-cone", type: "fill", source: "wpx-trop-cone-src", paint: { "fill-color": "#ffffff", "fill-opacity": 0.2 } });
+    X.addLayerOnce(map, { id: "wpx-trop-cone-line", type: "line", source: "wpx-trop-cone-src", paint: { "line-color": "#ffffff", "line-width": 1.6, "line-opacity": 0.95 } });
+    X.addLayerOnce(map, { id: "wpx-trop-ww", type: "line", source: "wpx-trop-ww-src", layout: { "line-cap": "round" }, paint: {
+      "line-color": ["match", ["get", "tcww"], "HWR", WW.HWR[1], "HWA", WW.HWA[1], "TWR", WW.TWR[1], "TWA", WW.TWA[1], "#ffffff"],
+      "line-width": ["match", ["get", "tcww"], "HWR", 6, "HWA", 5, "TWR", 5, "TWA", 4, 4] } });
+    X.addLayerOnce(map, { id: "wpx-trop-past-casing", type: "line", source: "wpx-trop-past-src", paint: { "line-color": "#0a0d14", "line-width": 4, "line-opacity": 0.7 } });
+    X.addLayerOnce(map, { id: "wpx-trop-past", type: "line", source: "wpx-trop-past-src", paint: { "line-color": "#e8edf7", "line-width": 1.6, "line-opacity": 0.9 } });
+    X.addLayerOnce(map, { id: "wpx-trop-pastpt", type: "circle", source: "wpx-trop-pastpt-src", paint: { "circle-radius": 3.5, "circle-color": ["get", "__color"], "circle-stroke-color": "#0a0d14", "circle-stroke-width": 1 } });
+    X.addLayerOnce(map, { id: "wpx-trop-track", type: "line", source: "wpx-trop-track-src", paint: { "line-color": "#ffffff", "line-width": 2, "line-opacity": 0.95, "line-dasharray": [3, 3] } });
+    X.addLayerOnce(map, { id: "wpx-trop-pts", type: "circle", source: "wpx-trop-pts-src", paint: { "circle-radius": ["case", ["get", "__now"], 11, 8], "circle-color": ["get", "__color"], "circle-stroke-color": "#ffffff", "circle-stroke-width": ["case", ["get", "__now"], 2.5, 1.2] } });
+    X.addLayerOnce(map, { id: "wpx-trop-pts-letter", type: "symbol", source: "wpx-trop-pts-src", layout: { "text-field": ["get", "__letter"], "text-size": 11, "text-allow-overlap": true }, paint: { "text-color": "#0a0d14" } });
+    X.addLayerOnce(map, { id: "wpx-trop-pts-when", type: "symbol", source: "wpx-trop-pts-src", layout: {
+      "text-field": ["case", ["get", "__now"], ["concat", ["upcase", ["coalesce", ["get", "stormname"], ""]], "\n", ["coalesce", ["get", "datelbl"], ""]], ["coalesce", ["get", "datelbl"], ""]],
+      "text-size": ["case", ["get", "__now"], 13, 10], "text-offset": [0, 1.4], "text-anchor": "top", "text-optional": true }, paint: { "text-color": "#ffffff", "text-halo-color": "#000", "text-halo-width": 1.4 } });
   }
 
+  function walk(c, out) {
+    if (!Array.isArray(c)) return;
+    if (typeof c[0] === "number") { out.push(c); return; }
+    c.forEach(x => walk(x, out));
+  }
   function fitStorms(storm) {
     const map = T.map;
     if (!map) return;
@@ -241,91 +220,79 @@
     const pts = [];
     list.forEach(s => {
       if (s.lat !== null && s.lon !== null) pts.push([s.lon, s.lat]);
-      const g = T.geo[s.bin];
-      (g?.cone?.features || []).forEach(f => walk(f.geometry?.coordinates, pts));
+      (((T.bins[s.bin] || {}).cone || {}).features || []).forEach(f => walk(f.geometry && f.geometry.coordinates, pts));
     });
     if (!pts.length) return;
     const lons = pts.map(p => p[0]), lats = pts.map(p => p[1]);
     try { map.fitBounds([[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]], { padding: 40, maxZoom: storm ? 6 : 5, duration: 700 }); } catch (_) {}
   }
-  function walk(c, out) {
-    if (!Array.isArray(c)) return;
-    if (typeof c[0] === "number") { out.push(c); return; }
-    c.forEach(x => walk(x, out));
-  }
 
   /* ---------- UI ---------- */
-  function select(bin) {
+  function select(bin, fromMap) {
     T.selected = bin;
     T.tab = "storms";
     const storm = T.storms.find(s => s.bin === bin);
     draw();
-    if (storm) fitStorms(storm);
-    const target = T.body?.querySelector(".wpx-trop-detail");
+    if (storm && !fromMap) fitStorms(storm);
+    const target = T.body && T.body.querySelector(".wpx-trop-detail");
     if (target) target.scrollIntoView({ block: "nearest" });
-    if (T.tv && X.tv) X.tv.focusFirst(T.body.querySelector(".wpx-trop-panel"));
+    if (T.tv && X.tv && T.body) X.tv.focusFirst(T.body.querySelector(".wpx-trop-panel"));
   }
 
   function motionText(s) {
-    if (s.dir === null && s.speed === null) return "--";
-    if (s.speed === 0) return "Stationary";
-    const speed = s.speed === null ? "" : s.speedKt ? ` at ${ktToMph(s.speed)} mph` : ` at ${Math.round(s.speed)} mph`;
-    return `${compass(s.dir)}${speed}`;
+    if (s.dir === null && s.spdKt === null) return "--";
+    if (s.spdKt === 0) return "Stationary";
+    return `${compass(s.dir)}${s.spdKt !== null ? ` at ${Math.round(s.spdKt * 1.15078)} mph` : ""}`;
   }
 
   function stormCard(s) {
-    const color = stormColor(s.kt);
+    const color = colorFor(s.kt, s.type);
     return `<button class="wpx-trop-storm${T.selected === s.bin ? " active" : ""}" data-wpx="tropSelect" data-bin="${escA(s.bin)}" style="--storm:${color}">
-      <span class="wpx-trop-dot"></span>
-      <span><strong>${esc(CLASS_NAMES[s.cls] || s.cls)} ${esc(s.name)}</strong><small>${s.kt !== null ? `${ktToMph(s.kt)} mph` : "--"} · ${s.mb !== null ? `${s.mb} mb` : "--"} · ${esc(motionText(s))}</small></span></button>`;
+      <span class="wpx-trop-dot">${esc(letterFor(s.p0))}</span>
+      <span><strong>${esc(s.name)}</strong><small>${esc(s.kind)} · ${esc(mph(s.kt))}${s.advNum ? ` · Adv ${esc(s.advNum)}` : ""}</small></span></button>`;
   }
 
-  function forecastRows(bin) {
-    const pts = (T.geo[bin]?.points?.features || []).map(f => f.properties || {}).sort((a, b) => num(a.TAU) - num(b.TAU));
+  function forecastRows(s) {
+    const pts = s.forecast;
     if (!pts.length) return "";
-    return `<table class="wpx-table"><thead><tr><th>Time</th><th>Wind</th><th>Type</th></tr></thead><tbody>${pts.map(p => {
-      const kt = num(p.MAXWIND);
-      const when = p.FLDATELBL || p.DATELBL || (num(p.TAU) !== null ? `+${p.TAU} h` : "");
-      return `<tr><td>${esc(num(p.TAU) === 0 ? "Now" : when)}</td><td>${kt !== null ? `${ktToMph(kt)} mph` : "--"}</td><td>${esc(CLASS_NAMES[String(p.STORMTYPE || p.DVLBL || "").toUpperCase()] || p.TCDVLP || p.STORMTYPE || "")}</td></tr>`;
-    }).join("")}</tbody></table>`;
+    return `<table class="wpx-table"><thead><tr><th>Time</th><th>Wind</th><th>Type</th></tr></thead><tbody>${pts.map(p => `<tr><td>${esc(Number(p.tau) === 0 ? "Now" : p.datelbl || `+${p.tau} h`)}</td><td>${esc(mph(p.maxwind))}</td><td>${esc(p.tcdvlp || TYPE_NAMES[String(p.stormtype || "").toUpperCase()] || p.stormtype || "")}</td></tr>`).join("")}</tbody></table>`;
   }
 
-  function wwList(bin) {
-    const kinds = [...new Set((T.geo[bin]?.ww?.features || []).map(f => f.properties?.TCWW).filter(Boolean))];
+  function wwList(s) {
+    const kinds = [...new Set((((T.bins[s.bin] || {}).ww || {}).features || []).map(f => f.properties.tcww).filter(Boolean))];
     if (!kinds.length) return `<p class="wpx-note">No coastal watches or warnings in effect for this storm.</p>`;
-    return `<div class="wpx-chips">${kinds.map(k => `<span class="wpx-tag" style="--c:${WW_COLORS[k] || "#fff"}">${esc(WW_NAMES[k] || k)}</span>`).join("")}</div>`;
+    return `<div class="wpx-chips">${kinds.map(k => `<span class="wpx-tag" style="--c:${(WW[k] || [0, "#fff"])[1]}">${esc((WW[k] || [k])[0])}</span>`).join("")}</div>`;
   }
 
   function stormDetail(s) {
     const kt = s.kt;
-    const adv = s.advisory || {};
-    return `<div class="wpx-card wpx-trop-detail" style="--storm:${stormColor(kt)}">
-      <div class="wpx-trop-title"><span class="wpx-trop-dot"></span><div><h3>${esc(CLASS_NAMES[s.cls] || s.cls)} ${esc(s.name)}</h3><small>${esc(s.id)}${s.bin ? ` · ${esc(s.bin)}` : ""}</small></div></div>
+    return `<div class="wpx-card wpx-trop-detail" style="--storm:${colorFor(kt, s.type)}">
+      <div class="wpx-trop-title"><span class="wpx-trop-dot">${esc(letterFor(s.p0))}</span><div><h3>${esc(s.kind)} ${esc(s.name)}</h3><small>${esc(s.id)}${s.bin ? ` · ${esc(s.bin)}` : ""}</small></div></div>
       <div class="wpx-kv">
-        <div><small>Max winds</small><strong>${kt !== null ? `${ktToMph(kt)} mph` : "--"}</strong><em>${kt !== null ? `${kt} kt · ${esc(category(kt))}` : ""}</em></div>
-        <div><small>Pressure</small><strong>${s.mb !== null ? `${s.mb} mb` : "--"}</strong><em>${s.mb !== null ? `${(s.mb * 0.02953).toFixed(2)} inHg` : ""}</em></div>
+        <div><small>Max winds</small><strong>${esc(mph(kt))}</strong><em>${kt !== null ? `${kt} kt · ${esc(category(kt))}` : ""}</em></div>
+        <div><small>Gusts</small><strong>${esc(mph(s.gust))}</strong></div>
+        <div><small>Pressure</small><strong>${s.mb !== null ? `${s.mb} mb` : "—"}</strong><em>${s.mb !== null ? `${(s.mb * 0.02953).toFixed(2)} inHg` : ""}</em></div>
         <div><small>Motion</small><strong>${esc(motionText(s))}</strong><em>${s.dir !== null ? `${Math.round(s.dir)}°` : ""}</em></div>
-        <div><small>Position</small><strong>${esc(s.latText || (s.lat !== null ? `${Math.abs(s.lat).toFixed(1)}°${s.lat >= 0 ? "N" : "S"}` : "--"))} ${esc(s.lonText || (s.lon !== null ? `${Math.abs(s.lon).toFixed(1)}°${s.lon >= 0 ? "E" : "W"}` : ""))}</strong></div>
-        <div><small>Advisory</small><strong>${adv.advNum ? `#${esc(adv.advNum)}` : "--"}</strong><em>${esc(timeLabel(adv.issuance || s.updated))}</em></div>
+        <div><small>Position</small><strong>${s.lat !== null ? `${Math.abs(s.lat).toFixed(1)}°${s.lat >= 0 ? "N" : "S"} ${Math.abs(s.lon).toFixed(1)}°${s.lon >= 0 ? "E" : "W"}` : "—"}</strong></div>
+        <div><small>Advisory</small><strong>${s.advNum ? `#${esc(s.advNum)}` : "—"}</strong><em>${esc(s.advDate)}</em></div>
       </div>
-      <h4>Coastal watches &amp; warnings</h4>${wwList(s.bin)}
-      <h4>Forecast track</h4>${forecastRows(s.bin) || `<p class="wpx-note">Forecast points are loading or unavailable.</p>`}
+      <h4>Coastal watches &amp; warnings</h4>${wwList(s)}
+      <h4>Forecast track</h4>${forecastRows(s)}
       <div class="wpx-btnrow">
-        ${adv.url ? `<button class="wpx-btn" data-wpx="openUrl" data-url="${escA(adv.url)}">Public advisory</button>` : ""}
-        ${s.discussion?.url ? `<button class="wpx-btn" data-wpx="openUrl" data-url="${escA(s.discussion.url)}">Discussion</button>` : ""}
-        <button class="wpx-btn" data-wpx="tropSat" data-id="${escA(s.id)}">Satellite</button>
+        ${s.advUrl ? `<button class="wpx-btn" data-wpx="openUrl" data-url="${escA(s.advUrl)}">Public advisory</button>` : ""}
+        ${s.discUrl ? `<button class="wpx-btn" data-wpx="openUrl" data-url="${escA(s.discUrl)}">Discussion</button>` : ""}
+        ${s.id ? `<button class="wpx-btn" data-wpx="tropSat" data-id="${escA(s.id)}">Satellite</button>` : ""}
       </div>
     </div>`;
   }
 
   function outlookHtml() {
-    const areas = T.outlook.areas7?.features || [];
+    const areas = T.outlook.areas.features || [];
     if (T.loading && !areas.length) return `<p class="wpx-note">Loading the 7-day outlook…</p>`;
-    if (!areas.length) return `<p class="wpx-note">No areas of possible development are highlighted by NHC in the 7-day outlook.</p>`;
+    if (!areas.length) return `<p class="wpx-note">NHC isn't highlighting any areas for possible development in the 7-day outlook.</p>`;
     return areas.map(f => {
       const p = f.properties || {};
-      const risk = String(p.RISK7DAY || p.risk7day || "").toLowerCase();
-      return `<div class="wpx-card" style="border-left:5px solid ${RISK_COLORS[risk] || RISK_COLORS.low}"><strong>${esc(p.BASIN ? `${p.BASIN} ` : "")}Area of interest</strong><div class="wpx-kv"><div><small>2-day formation</small><strong>${esc(p.PROB2DAY || p.prob2day || "--")}</strong><em>${esc(p.RISK2DAY || p.risk2day || "")}</em></div><div><small>7-day formation</small><strong>${esc(p.PROB7DAY || p.prob7day || "--")}</strong><em>${esc(p.RISK7DAY || p.risk7day || "")}</em></div></div></div>`;
+      return `<div class="wpx-card" style="border-left:5px solid ${RISK[p.risk7day] || RISK.Low}"><strong>${esc(p.basin ? `${p.basin} · ` : "")}Area to watch</strong><div class="wpx-kv"><div><small>2-day formation</small><strong>${esc(p.prob2day || "--")}</strong><em>${esc(p.risk2day || "")}</em></div><div><small>7-day formation</small><strong>${esc(p.prob7day || "--")}</strong><em>${esc(p.risk7day || "")}</em></div></div></div>`;
     }).join("") + `<p class="wpx-note">Source: NHC Graphical Tropical Weather Outlook.</p>`;
   }
 
@@ -337,28 +304,18 @@
     { id: "tpw", sat: "GOES18", label: "Tropical Pacific", sizes: ["1800x1080", "900x540"] }
   ];
   const BANDS = [["GEOCOLOR", "GeoColor"], ["13", "Infrared"], ["Sandwich", "Sandwich"]];
-
-  function sectorUrls(sector, band) {
-    const base = `https://cdn.star.nesdis.noaa.gov/${sector.sat}/ABI/SECTOR/${sector.id}/${band}`;
-    return sector.sizes.map(size => `${base}/${size}.jpg`).concat(`${base}/latest.jpg`);
-  }
-  function floaterUrls(stormId, band) {
-    const base = `https://cdn.star.nesdis.noaa.gov/FLOATER/data/${stormId}/${band}`;
-    return [`${base}/1000x1000.jpg`, `${base}/latest.jpg`];
-  }
-
-  function satImg(urls, alt) {
-    return `<img class="wpx-sat-img" alt="${escA(alt)}" src="${escA(urls[0])}" data-fallbacks="${escA(urls.slice(1).join("|"))}">`;
-  }
+  const sectorUrls = (sector, band) => { const base = `https://cdn.star.nesdis.noaa.gov/${sector.sat}/ABI/SECTOR/${sector.id}/${band}`; return sector.sizes.map(size => `${base}/${size}.jpg`).concat(`${base}/latest.jpg`); };
+  const floaterUrls = (stormId, band) => { const base = `https://cdn.star.nesdis.noaa.gov/FLOATER/data/${stormId}/${band}`; return [`${base}/1000x1000.jpg`, `${base}/latest.jpg`]; };
+  const satImg = (urls, alt) => `<img class="wpx-sat-img" alt="${escA(alt)}" src="${escA(urls[0])}" data-fallbacks="${escA(urls.slice(1).join("|"))}">`;
 
   function satelliteHtml() {
     const sat = X.prefs.tropicalSat = Object.assign({ sector: "taw", band: "GEOCOLOR", storm: "" }, X.prefs.tropicalSat || {});
     const sector = SECTORS.find(s => s.id === sat.sector) || SECTORS[0];
     const storm = sat.storm && T.storms.find(s => s.id === sat.storm);
-    return `<div class="wpx-chips">${T.storms.map(s => `<button class="wpx-chip${sat.storm === s.id ? " active" : ""}" data-wpx="tropSat" data-id="${escA(s.id)}">${esc(s.name)}</button>`).join("")}${SECTORS.map(s => `<button class="wpx-chip${!sat.storm && sat.sector === s.id ? " active" : ""}" data-wpx="tropSector" data-id="${s.id}">${esc(s.label)}</button>`).join("")}</div>
+    return `<div class="wpx-chips">${T.storms.filter(s => s.id).map(s => `<button class="wpx-chip${sat.storm === s.id ? " active" : ""}" data-wpx="tropSat" data-id="${escA(s.id)}">${esc(s.name)}</button>`).join("")}${SECTORS.map(s => `<button class="wpx-chip${!storm && sat.sector === s.id ? " active" : ""}" data-wpx="tropSector" data-id="${s.id}">${esc(s.label)}</button>`).join("")}</div>
       <div class="wpx-chips">${BANDS.map(([id, label]) => `<button class="wpx-chip${sat.band === id ? " active" : ""}" data-wpx="tropBand" data-id="${id}">${esc(label)}</button>`).join("")}</div>
       <div class="wpx-card wpx-sat">${storm ? satImg(floaterUrls(storm.id, sat.band), `${storm.name} GOES floater`) : satImg(sectorUrls(sector, sat.band), `${sector.label} GOES imagery`)}</div>
-      <p class="wpx-note">${storm ? `${esc(storm.name)} storm floater` : `${esc(sector.label)} · ${esc(sector.sat.replace("GOES", "GOES-"))}`} · latest image from NOAA/NESDIS STAR. Refreshes about every 10 minutes.</p>`;
+      <p class="wpx-note">${storm ? `${esc(storm.name)} storm floater` : `${esc(sector.label)} · ${esc(sector.sat.replace("GOES", "GOES-"))}`} · latest image from NOAA/NESDIS STAR, updated about every 10 minutes.</p>`;
   }
 
   function panelHtml() {
@@ -368,63 +325,56 @@
     if (T.tab === "outlook") content = outlookHtml();
     else if (T.tab === "satellite") content = satelliteHtml();
     else {
-      content = `${T.stormsError ? `<p class="wpx-note">${esc(T.stormsError)}</p>` : ""}${T.layersError ? `<p class="wpx-note">${esc(T.layersError)}</p>` : ""}
-        ${!T.stormsLoaded ? `<p class="wpx-note">Loading active storms…</p>` : T.storms.length ? T.storms.map(stormCard).join("") : `<div class="wpx-card"><strong>No active tropical cyclones</strong><p class="wpx-note">NHC is not issuing advisories right now. Check the 7-day outlook for areas to watch.</p></div>`}
-        ${selected ? stormDetail(selected) : ""}`;
+      content = `${T.error ? `<p class="wpx-note err">${esc(T.error)}</p>` : ""}
+        ${!T.loaded ? `<p class="wpx-note">Loading NHC advisories…</p>` : T.storms.length ? T.storms.map(stormCard).join("") : T.error ? "" : `<div class="wpx-card"><strong>No active tropical cyclones</strong><p class="wpx-note">NHC is not issuing advisories right now. Check the 7-day outlook for areas to watch.</p></div>`}
+        ${selected ? stormDetail(selected) : ""}
+        <div class="wpx-classes wpx-trop-key">${Object.keys(WW).map(k => `<span><i style="background:${WW[k][1]}"></i>${esc(WW[k][0])}</span>`).join("")}<span><i style="background:${RISK.Medium}"></i>× = NHC outlook area</span></div>`;
     }
     return `<div class="wpx-tabs wpx-trop-tabs">${[["storms", "Storms"], ["outlook", "7-Day Outlook"], ["satellite", "GOES Satellite"]].map(([id, label]) => `<button class="wpx-chip${T.tab === id ? " active" : ""}" data-wpx="tropTab" data-tab="${id}">${esc(label)}</button>`).join("")}<button class="wpx-chip" data-wpx="tropRefresh">${T.loading ? "Updating…" : "Refresh"}</button></div>
       <div class="wpx-chips wpx-trop-toggles">${toggles.map(([key, label]) => `<button class="wpx-chip toggle${T.show[key] ? " active" : ""}" data-wpx="tropToggle" data-key="${key}" aria-pressed="${T.show[key]}">${esc(label)}</button>`).join("")}</div>
       ${content}
-      <p class="wpx-note">Official information: National Hurricane Center. ${T.fetchedAt ? `Updated ${esc(new Date(T.fetchedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }))}.` : ""}</p>`;
+      <p class="wpx-note">Official information: National Hurricane Center.${T.fetchedAt ? ` Updated ${esc(new Date(T.fetchedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }))}.` : ""}</p>`;
   }
 
+  const focusSignature = el => `${el.dataset.wpx || ""}|${el.dataset.bin || el.dataset.key || el.dataset.tab || el.dataset.id || ""}`;
   function draw() {
-    const panel = T.body?.querySelector(".wpx-trop-panel");
+    const panel = T.body && T.body.querySelector(".wpx-trop-panel");
     if (!panel) return;
     const focusKey = document.activeElement && panel.contains(document.activeElement) ? focusSignature(document.activeElement) : "";
     const scroll = panel.scrollTop;
     panel.innerHTML = panelHtml();
     panel.scrollTop = scroll;
-    wireSatFallbacks(panel);
-    if (focusKey) {
-      const again = [...panel.querySelectorAll("[data-wpx]")].find(el => focusSignature(el) === focusKey);
-      if (again) again.focus({ preventScroll: true });
-      else if (T.tv && X.tv) X.tv.focusFirst(panel);
-    }
-  }
-  const focusSignature = el => `${el.dataset.wpx || ""}|${el.dataset.bin || el.dataset.key || el.dataset.tab || el.dataset.id || ""}`;
-
-  function wireSatFallbacks(root) {
-    root.querySelectorAll("img[data-fallbacks]").forEach(img => {
+    panel.querySelectorAll("img[data-fallbacks]").forEach(img => {
       img.addEventListener("error", () => {
         const rest = (img.dataset.fallbacks || "").split("|").filter(Boolean);
         if (rest.length) { img.dataset.fallbacks = rest.slice(1).join("|"); img.src = rest[0]; }
         else img.replaceWith(Object.assign(document.createElement("p"), { className: "wpx-note", textContent: "Satellite imagery for this view is not available right now." }));
       });
     });
+    if (focusKey) {
+      const again = [...panel.querySelectorAll("[data-wpx]")].find(el => focusSignature(el) === focusKey);
+      if (again) again.focus({ preventScroll: true });
+      else if (T.tv && X.tv) X.tv.focusFirst(panel);
+    }
   }
 
-  function open(options = {}) {
-    T.tv = !!options.tv;
-    const body = X.openOverlay({ id: "tropical", title: "Tropical Storm Center", className: `wpx-tropical${T.tv ? " wpx-tv-screen" : ""}`, onClose: () => { try { T.map && T.map.remove(); } catch (_) {} T.map = null; T.body = null; } });
-    T.body = body;
-    body.innerHTML = `<div class="wpx-trop-layout"><div class="wpx-trop-map" id="wpxTropMap"></div><div class="wpx-trop-panel"></div></div>`;
-    draw();
-    requestAnimationFrame(() => initMap(body.querySelector("#wpxTropMap")));
-    refresh(false);
-    return body;
-  }
-
-  // TV screens embed the same center inside their own content area.
-  function mount(container, options = {}) {
-    T.tv = !!options.tv;
+  function mountInto(container) {
     T.body = container;
     container.innerHTML = `<div class="wpx-trop-layout"><div class="wpx-trop-map" id="wpxTropMap"></div><div class="wpx-trop-panel"></div></div>`;
     draw();
     requestAnimationFrame(() => initMap(container.querySelector("#wpxTropMap")));
     refresh(false);
   }
-  function unmount() { try { T.map && T.map.remove(); } catch (_) {} T.map = null; T.body = null; }
+  function unmount() { clearTimeout(T.timer); try { T.map && T.map.remove(); } catch (_) {} T.map = null; T.body = null; }
+
+  function open() {
+    T.tv = false;
+    const body = X.openOverlay({ id: "tropical", title: "Tropical Storm Center", className: "wpx-tropical", onClose: unmount });
+    mountInto(body);
+    return body;
+  }
+  // TV screens embed the same center in their own content area.
+  function mount(container, options = {}) { T.tv = !!options.tv; mountInto(container); }
 
   Object.assign(X.actions, {
     openTropical: () => open(),
@@ -447,26 +397,36 @@
         const host = document.getElementById("moreContent");
         const first = host && host.querySelector(".section");
         if (host && first && !host.querySelector(".wpx-more")) {
-          const item = (action, title, detail, glyph, tab) => `<button class="tool" data-wpx="${action}"${tab ? ` data-tab="${tab}"` : ""}><span class="wpx-more-glyph" aria-hidden="true">${glyph}</span><span><strong>${esc(title)}</strong><span>${esc(detail)}</span></span>${action === "openTropical" && T.storms.length ? `<span class="badge soon-badge">${T.storms.length} active</span>` : ""}<span class="chev">›</span></button>`;
+          const item = (action, title, detail, glyph, tab, then) => `<button class="tool" data-wpx="${action}"${tab ? ` data-tab="${tab}"` : ""}${then ? ` data-then="${then}"` : ""}><span class="wpx-more-glyph" aria-hidden="true">${glyph}</span><span><strong>${esc(title)}</strong><span>${esc(detail)}</span></span>${action === "openTropical" && T.storms.length ? `<span class="badge soon-badge">${T.storms.length} active</span>` : ""}<span class="chev">›</span></button>`;
           const section = document.createElement("section");
           section.className = "section wpx-more";
           section.innerHTML = `<div class="section-head"><h2>Radar 3.1 &amp; Tropics</h2><span>New</span></div><div class="tool-list">
-            ${item("openTropical", "Tropical Storm Center", "Active storms, cones, tracks, watches/warnings, 7-day outlook, GOES satellite.", "🌀")}
-            ${item("r31Open", "Radar 3.1 site products", "Pick any NEXRAD site, product and tilt: velocity, CC, ZDR, KDP, echo tops, VIL.", "📡", "radar")}
-            ${item("r31Open", "MRMS hail & rotation", "Hail size and rotation tracks from NOAA MRMS.", "🧊", "mrms")}
-            ${item("r31Open", "Model Studio", "HRRR, NAM, GFS and ECMWF forecast fields on the radar map.", "🧭", "models")}
-            ${item("r31Open", "Route weather", "NWS forecasts and alerts along your drive.", "🚗", "route")}
-            ${item("r31Open", "Point soundings", "HRRR skew-T and severe parameters for any point.", "📈", "sounding")}
-            ${item("r31Open", "Gas & shelters", "Gas station prices and tornado shelters on the map.", "⛽", "map")}
+            ${item("openTropical", "Tropical Storm Center", "Active storms, cones, tracks, watches/warnings, 7-day outlook and GOES satellite.", "🌀")}
+            ${item("r31Open", "Radar products", "Any NEXRAD site: velocity, CC, ZDR, KDP, hydrometeor class, echo tops, VIL — every tilt.", "📡", "radar")}
+            ${item("r31Open", "Storm damage layers", "NOAA MRMS hail swaths, rotation tracks and rainfall totals.", "🧊", "mrms")}
+            ${item("r31Open", "Model Studio", "HRRR, NAM, GFS and ECMWF forecast maps on the radar.", "🧭", "models", "studioOpen")}
+            ${item("r31Open", "Point soundings", "Skew-T and hodograph for any point, from HRRR and weather balloons.", "📈", "sounding")}
+            ${item("r31Open", "Route weather", "Conditions and alerts along your drive, with gas and shelters on the way.", "🚗", "route")}
+            ${item("r31Open", "Gas & tornado shelters", "Every U.S. gas station with area prices, and public shelters.", "⛽", "map")}
           </div>`;
           first.after(section);
+        } else if (host) {
+          const badgeHost = host.querySelector('.wpx-more [data-wpx="openTropical"]');
+          if (badgeHost && T.storms.length && !badgeHost.querySelector(".badge")) badgeHost.querySelector(".chev").insertAdjacentHTML("beforebegin", `<span class="badge soon-badge">${T.storms.length} active</span>`);
         }
       } catch (error) { console.warn(error); }
       return out;
     };
     try { renderMore(); } catch (_) {}
   }
-  loadStorms().then(() => { try { if (T.storms.length) renderMore(); } catch (_) {} });
 
-  X.tropical = { open, mount, unmount, refresh, state: T, activeCount: () => T.storms.length, loadStorms: async () => { if (!T.stormsLoaded) await loadStorms(); return T.storms; } };
+  async function loadStormsOnly() {
+    if (!T.loaded) {
+      try { await load(); T.fetchedAt = Date.now(); } catch (_) {}
+      try { if (typeof renderMore === "function") renderMore(); } catch (_) {}
+    }
+    return T.storms;
+  }
+
+  X.tropical = { open, mount, unmount, refresh, state: T, activeCount: () => T.storms.length, loadStorms: loadStormsOnly };
 })();

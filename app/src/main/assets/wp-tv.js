@@ -26,7 +26,7 @@
     idleTimer: 0,
     ambient: null,
     radar: { map: null, baseZoom: 6, mapMode: false, layers: { refl: true, warnings: true, vel: false, hail: false, rot: false, tropical: false }, loop: true, frame: 0, timer: 0, frames: [], velSite: "", velTime: "" },
-    models: { map: null, playing: false, timer: 0 }
+    models: { map: null, listener: null }
   };
   const saved = X.prefs.tv = Object.assign({ screen: "radar", layers: null }, X.prefs.tv || {});
   if (saved.layers) Object.assign(TV.radar.layers, saved.layers);
@@ -134,10 +134,9 @@
     try { TV.radar.map && TV.radar.map.remove(); } catch (_) {}
     TV.radar.map = null;
     TV.radar.mapMode = false;
+    if (TV.models.map || TV.models.listener) leaveModels();
     try { TV.models.map && TV.models.map.remove(); } catch (_) {}
     TV.models.map = null;
-    clearInterval(TV.models.timer);
-    TV.models.playing = false;
     if (X.tropical) X.tropical.unmount();
     TV.sub = null;
   }
@@ -173,7 +172,7 @@
   function radarBar() {
     const L = TV.radar.layers;
     const btn = (key, label) => `<button class="wpx-tv-chip${L[key] ? " active" : ""}" data-wpx="tvLayer" data-key="${key}" aria-pressed="${!!L[key]}">${esc(label)}</button>`;
-    return `${btn("refl", "Reflectivity")}${btn("vel", "Velocity")}${btn("hail", "MRMS Hail")}${btn("rot", "Rotation")}${btn("warnings", "Warnings")}${btn("tropical", "Tropical")}
+    return `${btn("refl", "Reflectivity")}${btn("vel", "Velocity")}${btn("hail", "Hail 24h")}${btn("rot", "Rotation 24h")}${btn("warnings", "Warnings")}${btn("tropical", "Tropical")}
       <button class="wpx-tv-chip" data-wpx="tvLoop">${TV.radar.loop ? "⏸ Loop" : "▶ Loop"}</button>
       <button class="wpx-tv-chip" data-wpx="tvRecenter">⌖ Home</button>
       <button class="wpx-tv-chip primary" data-wpx="tvMapMode">✥ Move map</button>`;
@@ -228,23 +227,29 @@
 
     const title = document.getElementById("wpxTvRadarTitle");
     if (L.vel) {
+      // Nearest NEXRAD site to home, lowest-tilt velocity (N0G) from the WeatherPower render service.
       const site = X.radar.sitesByDistance({ latitude: state.location.latitude, longitude: state.location.longitude })[0];
-      const loadVel = s => X.radar.l3Template(s.id, "N0G").then(t => {
-        TV.radar.velSite = s.id;
-        TV.radar.velTime = t.time;
-        X.setRaster(map, "wpx-tv-vel", [t.tiles], { opacity: 0.85, beforeId: before, maxzoom: 14 });
-        if (title) title.textContent = `Velocity · ${s.id}`;
-        updateTimeLabel();
-      });
-      if (site) loadVel(site);
-      else X.radar.loadSites().then(() => { const s = X.radar.sitesByDistance({ latitude: state.location.latitude, longitude: state.location.longitude })[0]; if (s) loadVel(s); });
+      if (site) {
+        TV.radar.velSite = X.radar.displayId(site.id);
+        X.radar.latest(site.id, "N0G").then(info => {
+          if (TV.radar.map !== map || !TV.radar.layers.vel) return;
+          TV.radar.velTime = info.valid;
+          X.setRaster(map, "wpx-tv-vel", [X.radar.l3Tiles(info, "G")], { opacity: 0.85, beforeId: before, maxzoom: 16 });
+          if (title) title.textContent = `Velocity · ${TV.radar.velSite}`;
+          updateTimeLabel();
+        }).catch(error => {
+          if (title) title.textContent = `Velocity · ${TV.radar.velSite} unavailable`;
+          say(`${TV.radar.velSite}: ${error.message || error}`);
+        });
+      }
     } else {
       X.removeLayerAndSource(map, "wpx-tv-vel");
+      TV.radar.velTime = "";
       if (title) title.textContent = "Live Radar";
     }
     [["hail", "hail"], ["rot", "rotation"]].forEach(([key, product]) => {
       if (L[key]) {
-        X.radar.mrmsTemplate(product, 60).then(t => { if (t.tiles && TV.radar.map === map) X.setRaster(map, `wpx-tv-${key}`, [t.tiles], { opacity: 0.85, beforeId: before, maxzoom: 12 }); })
+        X.radar.mrmsLatest(product).then(t => { if (TV.radar.map === map && TV.radar.layers[key]) X.setRaster(map, `wpx-tv-${key}`, [t.tiles], { opacity: 0.85, beforeId: before, maxzoom: 14 }); })
           .catch(error => say(`MRMS ${product} unavailable: ${error.message || error}`));
       } else X.removeLayerAndSource(map, `wpx-tv-${key}`);
     });
@@ -382,75 +387,64 @@
     focusFirst(box);
   }
 
-  /* ---------- Models ---------- */
-  async function renderModels() {
-    const S = X.radar.studio;
-    TV.main.innerHTML = `<div class="wpx-tv-models"><div class="wpx-tv-map" id="wpxTvModelMap"></div><div class="wpx-tv-model-panel" id="wpxTvModelPanel"><p class="lead">Loading model runs…</p></div></div>`;
+  /* ---------- Models (shared Model Studio engine) ---------- */
+  function renderModels() {
+    const S = X.studio;
+    TV.main.innerHTML = `<div class="wpx-tv-models"><div class="wpx-tv-map" id="wpxTvModelMap"></div><div class="wpx-tv-model-panel" id="wpxTvModelPanel"><p class="lead">Connecting to the model service…</p></div></div>`;
     const loc = state.location;
+    let map = null;
     if (window.maplibregl) {
-      TV.models.map = X.quietErrors(new maplibregl.Map({ container: TV.main.querySelector("#wpxTvModelMap"), style: X.basemapStyle(), center: [loc.longitude, loc.latitude], zoom: 4.2, attributionControl: false, interactive: false }));
-      TV.models.map.on("load", () => drawModelFrame());
+      map = X.quietErrors(new maplibregl.Map({ container: TV.main.querySelector("#wpxTvModelMap"), style: X.basemapStyle(), center: [loc.longitude, loc.latitude], zoom: 4.2, attributionControl: false, interactive: false }));
+      TV.models.map = map;
     }
-    S.prefs.on = true;
-    await S.loadRuns();
-    await S.loadHours();
-    drawModelPanel();
-    drawModelFrame();
-    setTimeout(() => focusFirst(TV.main.querySelector("#wpxTvModelPanel")), 60);
+    TV.models.listener = kind => {
+      if (TV.screen !== "models") return;
+      if (kind === "status" || kind === "hour" || kind === "play") updateModelChrome();
+      else drawModelPanel();
+    };
+    S.onChange(TV.models.listener);
+    const start = () => S.open(map).then(() => { drawModelPanel(); setTimeout(() => focusFirst(TV.main.querySelector("#wpxTvModelPanel")), 60); });
+    if (map) map.on("load", start); else start();
   }
 
   function drawModelPanel() {
-    const S = X.radar.studio, P = S.prefs, st = S.state;
+    const S = X.studio, st = S.state;
     const panel = document.getElementById("wpxTvModelPanel");
     if (!panel) return;
-    const runs = (st.runs[P.model] || []).slice(0, 4);
-    const fields = st.fields[P.model] || S.FALLBACK_FIELDS;
-    const hours = st.hours[`${P.model}/${P.run}`] || [];
+    if (!st.cat) { panel.innerHTML = `<h1>Model Studio</h1><p class="lead${st.error ? " err" : ""}">${esc(st.status || "Connecting to the model service…")}</p>`; return; }
+    const fields = st.cat.fields.filter(f => f.kind !== "contour" && f.models.indexOf(st.model) >= 0);
     const focusKey = panel.contains(document.activeElement) ? `${document.activeElement.dataset.wpx}|${document.activeElement.dataset.id || document.activeElement.dataset.d || ""}` : "";
     panel.innerHTML = `
       <h1>Model Studio</h1>
-      <div class="wpx-tv-row wrap">${S.MODELS.map(m => `<button class="wpx-tv-chip${P.model === m.id ? " active" : ""}" data-wpx="tvModel" data-id="${m.id}">${esc(m.label)}</button>`).join("")}</div>
-      ${st.error ? `<p class="wpx-note">${esc(st.error)}</p>` : ""}
-      <h2>Run</h2><div class="wpx-tv-row wrap">${runs.map(r => `<button class="wpx-tv-chip${P.run === r.id ? " active" : ""}" data-wpx="tvRun" data-id="${escA(r.id)}">${esc(timeLabel(r.id) || r.id)}</button>`).join("") || `<span class="wpx-note">No runs available</span>`}</div>
-      <h2>Field</h2><div class="wpx-tv-row wrap">${fields.map(f => `<button class="wpx-tv-chip${P.field === f.id ? " active" : ""}" data-wpx="tvField" data-id="${escA(f.id)}">${esc(f.label)}</button>`).join("")}</div>
-      <h2 id="wpxTvModelHour">F${String(P.fhr).padStart(2, "0")}${st.frame?.valid ? ` · valid ${esc(timeLabel(st.frame.valid))}` : ""} <small>${hours.length ? `of ${hours.length} hours` : ""}</small></h2>
-      <div class="wpx-tv-row"><button class="wpx-tv-chip" data-wpx="tvModelStep" data-d="-1">‹ Hour</button><button class="wpx-tv-chip primary" data-wpx="tvModelPlay">${TV.models.playing ? "⏸ Pause" : "▶ Play"}</button><button class="wpx-tv-chip" data-wpx="tvModelStep" data-d="1">Hour ›</button></div>
-      <p class="wpx-note">Model output from the WeatherPower model service (NOAA/NCEP, ECMWF open data).</p>`;
+      <div class="wpx-tv-row wrap">${st.cat.models.map(m => `<button class="wpx-tv-chip${st.model === m.key ? " active" : ""}" data-wpx="tvModel" data-id="${escA(m.key)}">${esc(m.name.replace(" 3km", ""))}</button>`).join("")}</div>
+      <h2>Run</h2><div class="wpx-tv-row wrap">${st.runs.slice(0, 4).map(r => `<button class="wpx-tv-chip${st.run === r.key ? " active" : ""}" data-wpx="tvRun" data-id="${escA(r.key)}">${esc(r.label)}</button>`).join("") || `<span class="wpx-note">No runs available</span>`}</div>
+      <h2>Field</h2><div class="wpx-tv-row wrap">${fields.map(f => `<button class="wpx-tv-chip${st.field === f.key ? " active" : ""}" data-wpx="tvField" data-id="${escA(f.key)}">${esc(f.name)}</button>`).join("")}</div>
+      <h2 id="wpxTvModelHour">${esc(S.runLabel())}</h2>
+      <p class="lead" id="wpxTvModelValid">${esc(S.validLabel())}</p>
+      <div class="wpx-tv-row"><button class="wpx-tv-chip" data-wpx="tvModelStep" data-d="-1">‹ Hour</button><button class="wpx-tv-chip primary" data-wpx="tvModelPlay" id="wpxTvModelPlay">${st.playing ? "⏸ Pause" : "▶ Play"}</button><button class="wpx-tv-chip" data-wpx="tvModelStep" data-d="1">Hour ›</button></div>
+      ${S.legendHtml()}
+      <p class="wpx-note${st.error ? " err" : ""}" id="wpxTvModelStatus">${esc(st.status)}</p>
+      <p class="wpx-note">${esc(S.credit())}</p>`;
     if (focusKey) {
       const again = [...panel.querySelectorAll("[data-wpx]")].find(el => `${el.dataset.wpx}|${el.dataset.id || el.dataset.d || ""}` === focusKey);
       if (again) focusEl(again); else focusFirst(panel);
     }
   }
 
-  async function drawModelFrame() {
-    const S = X.radar.studio, P = S.prefs;
-    const map = TV.models.map;
-    if (!P.run || !P.field) return;
-    const want = `${P.model}/${P.run}/${P.field}/${P.fhr}`;
-    TV.models.want = want;
-    const frame = await S.fetchFrameSpec(P.model, P.run, P.field, P.fhr);
-    if (TV.models.want !== want) return;
-    S.state.frame = frame;
-    if (X.mapReady(map)) S.drawFrame(map, frame, 0.75);
-    const h = document.getElementById("wpxTvModelHour");
-    if (h) h.firstChild.textContent = `F${String(P.fhr).padStart(2, "0")}${frame.valid ? ` · valid ${timeLabel(frame.valid)}` : ""} `;
+  function updateModelChrome() {
+    const S = X.studio, st = S.state;
+    const h = document.getElementById("wpxTvModelHour"), v = document.getElementById("wpxTvModelValid"), p = document.getElementById("wpxTvModelPlay"), status = document.getElementById("wpxTvModelStatus");
+    if (!h) { drawModelPanel(); return; }
+    h.textContent = S.runLabel();
+    if (v) v.textContent = S.validLabel();
+    if (p) p.textContent = st.playing ? "⏸ Pause" : "▶ Play";
+    if (status) { status.textContent = st.status; status.classList.toggle("err", st.error); }
   }
 
-  function stepModel(delta) {
-    const S = X.radar.studio, P = S.prefs;
-    const hours = S.state.hours[`${P.model}/${P.run}`] || [];
-    if (!hours.length) return;
-    let i = hours.indexOf(Number(P.fhr));
-    P.fhr = hours[(i + delta + hours.length) % hours.length];
-    X.savePrefs();
-    drawModelFrame();
-  }
-
-  function setModelPlaying(on) {
-    TV.models.playing = on;
-    clearInterval(TV.models.timer);
-    if (on) TV.models.timer = setInterval(() => stepModel(1), 1400);
-    drawModelPanel();
+  function leaveModels() {
+    if (TV.models.listener) { X.studio.offChange(TV.models.listener); TV.models.listener = null; }
+    X.studio.close();
+    X.studio.attach(null);
   }
 
   /* ---------- Ambient ---------- */
@@ -577,13 +571,13 @@
     if (TV.ambient) { exitAmbient(); return; }
     if (key === "playpause") {
       if (TV.screen === "radar") { TV.radar.loop = !TV.radar.loop; if (TV.radar.loop) startRadarLoop(); else stopRadarLoop(); refreshLayerBar(); }
-      else if (TV.screen === "models") setModelPlaying(!TV.models.playing);
+      else if (TV.screen === "models") { if (X.studio.state.playing) X.studio.stop(); else X.studio.play(); }
     } else if (key === "menu") {
       if (TV.screen === "radar" && TV.radar.mapMode) focusEl(TV.main.querySelector("[data-wpx='tvMapMode']"));
       else focusEl(railButton());
     } else if (key === "zoomin" && TV.screen === "radar") zoomRadar(1);
     else if (key === "zoomout" && TV.screen === "radar") zoomRadar(-1);
-    else if ((key === "next" || key === "prev") && TV.screen === "models") stepModel(key === "next" ? 1 : -1);
+    else if ((key === "next" || key === "prev") && TV.screen === "models") { X.studio.stop(); X.studio.step(key === "next" ? 1 : -1); }
   };
 
   function tvBack() {
@@ -643,11 +637,11 @@
       Promise.resolve(typeof fetchForecast === "function" ? fetchForecast() : null).finally(() => { if (TV.screen === "forecast") { renderForecast(); refocus(); } });
       if (typeof fetchAlerts === "function") fetchAlerts();
     },
-    tvModel: el => { const S = X.radar.studio; S.prefs.model = el.dataset.id; S.state.frame = null; X.savePrefs(); S.loadRuns().then(S.loadHours).then(() => { drawModelPanel(); drawModelFrame(); }); },
-    tvRun: el => { const S = X.radar.studio; S.prefs.run = el.dataset.id; X.savePrefs(); S.loadHours().then(() => { drawModelPanel(); drawModelFrame(); }); },
-    tvField: el => { const S = X.radar.studio; S.prefs.field = el.dataset.id; X.savePrefs(); drawModelPanel(); drawModelFrame(); },
-    tvModelStep: el => { setModelPlaying(false); stepModel(Number(el.dataset.d)); },
-    tvModelPlay: () => setModelPlaying(!TV.models.playing)
+    tvModel: el => X.studio.setModel(el.dataset.id),
+    tvRun: el => X.studio.setRun(el.dataset.id),
+    tvField: el => { X.studio.stop(); X.studio.setField(el.dataset.id); },
+    tvModelStep: el => { X.studio.stop(); X.studio.step(Number(el.dataset.d) || 1); },
+    tvModelPlay: () => { if (X.studio.state.playing) X.studio.stop(); else X.studio.play(); }
   });
 
   /* ---------- Activation ---------- */

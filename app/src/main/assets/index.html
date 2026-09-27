@@ -2732,7 +2732,7 @@
       .storm-risk-status { display: grid; gap: 12px; padding: 22px 0; color: var(--muted); }
       @media (max-width: 340px) { .storm-period { font-size: 11px; } .storm-risk-lead h2 { font-size: 21px; } }
 </style>
-    <link rel="stylesheet" href="wp-extras.css?v=175">
+    <link rel="stylesheet" href="wp-extras.css?v=175b">
   </head>
   <body>
     <div class="app" data-theme="power">
@@ -10550,7 +10550,7 @@
       });
 
       if ("serviceWorker" in navigator && location.protocol !== "file:") {
-        navigator.serviceWorker.register("sw.js?wpv=180-code175-20260927").catch(() => {});
+        navigator.serviceWorker.register("sw.js?wpv=180-code175b-20260927").catch(() => {});
       }
 
       loadState();
@@ -10562,9 +10562,11 @@
       if (state.onboardingComplete && state.releaseSeen !== RELEASE_VERSION) setTimeout(() => renderPage("whatsnew"), 700);
     </script>
     <!-- Radar 3.1, Tropical Storm Center and Android TV add-ons (share the globals above). -->
-    <script src="wp-core.js?v=175"></script>
-    <script src="wp-radar31.js?v=175"></script>
-    <script src="wp-tropical.js?v=175"></script>
-    <script src="wp-tv.js?v=175"></script>
+    <script src="wp-core.js?v=175b"></script>
+    <script src="wp-radar31.js?v=175b"></script>
+    <script src="wp-studio.js?v=175b"></script>
+    <script src="wp-travel.js?v=175b"></script>
+    <script src="wp-tropical.js?v=175b"></script>
+    <script src="wp-tv.js?v=175b"></script>
   </body>
 </html>

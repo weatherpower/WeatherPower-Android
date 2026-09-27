@@ -6,35 +6,43 @@
 
   const RENDER = "https://weatherpower.app/wpcc-render";
   const API_SERVER = "https://weatherpower.app/wpcc-api";
+  const MODELS = `${RENDER}/api/models`;
   const enc = encodeURIComponent;
 
-  // Every WeatherPower server path used by the add-ons lives here so a path change is a one-line fix.
+  // Every WeatherPower server path used by the add-ons, matching the Radar 3.1 web blocks.
+  // Level III site ids are the 3-letter NEXRAD ids ("TLX"), exactly as /api/radar/sites returns them.
   const API = {
     render: RENDER,
     radarProducts: () => `${RENDER}/api/radar/products`,
     radarSites: () => `${RENDER}/api/radar/sites`,
     radarLatest: (site, product) => `${RENDER}/api/radar/latest?site=${enc(site)}&product=${enc(product)}`,
     radarTile: (key, pal) => `${RENDER}/api/radar/tile/${enc(key)}/{z}/{x}/{y}.png${pal ? `?pal=${enc(pal)}` : ""}`,
-    radarLive: (site, product, pal) => `${RENDER}/api/radar/live/${enc(site)}/${enc(product)}/{z}/{x}/{y}.png${pal ? `?pal=${enc(pal)}` : ""}`,
-    radarVolume: () => `${RENDER}/api/radar/volume`,
+    radarLive: (site, product) => `${RENDER}/api/radar/live/${enc(site)}/${enc(product)}/{z}/{x}/{y}.png?t=${Math.floor(Date.now() / 60000)}`,
     mrmsProducts: () => `${RENDER}/api/mrms/products`,
-    mrmsLatest: (product, windowMin) => `${RENDER}/api/mrms/latest?product=${enc(product)}${windowMin ? `&window=${enc(windowMin)}` : ""}`,
+    mrmsLatest: (product, windowKey) => `${RENDER}/api/mrms/latest?product=${enc(product)}&window=${enc(windowKey)}`,
     mrmsTile: key => `${RENDER}/api/mrms/tile/${enc(key)}/{z}/{x}/{y}.png`,
-    mrmsValue: (key, lat, lon) => `${RENDER}/api/mrms/value?key=${enc(key)}&lat=${lat}&lon=${lon}`,
+    mrmsValue: (key, lat, lon) => `${RENDER}/api/mrms/value?key=${enc(key)}&lat=${Number(lat).toFixed(3)}&lon=${Number(lon).toFixed(3)}`,
     gasDots: () => `${RENDER}/gas/dots.js`,
-    gasTile: (lat, lon) => `${RENDER}/gas/t/${lat}_${lon}.js`,
-    gasStatus: () => `${RENDER}/gas/status`,
+    gasTile: key => `${RENDER}/gas/t/${key}.js`,
     shelters: () => `${RENDER}/data/tornado-shelters.json`,
-    modelRuns: model => `${RENDER}/api/models/runs/${enc(model)}`,
-    modelHours: (model, run) => `${RENDER}/api/models/hours/${enc(model)}/${enc(run)}`,
-    modelFrame: (model, run, field, fhr) => `${RENDER}/api/models/frame/${enc(model)}/${enc(run)}/${enc(field)}/${enc(fhr)}`,
-    modelProbe: (model, run, field, fhr, lat, lon) => `${RENDER}/api/models/probe/${enc(model)}/${enc(run)}/${enc(field)}/${enc(fhr)}?lat=${lat}&lon=${lon}`,
-    soundingImage: (lat, lon, fhr) => `${RENDER}/api/sounding?lat=${lat}&lon=${lon}&fhr=${enc(fhr)}`,
-    soundingJson: (lat, lon, model = "hrrr", hours = 19) => `${API_SERVER}/sounding?lat=${lat}&lon=${lon}&model=${enc(model)}&hours=${hours}`,
-    eiaGas: () => "https://api.eia.gov/v2/petroleum/pri/gnd/data/?api_key=DEMO_KEY&frequency=weekly&data[0]=value&facets[product][]=EPM0&facets[duoarea][]=NUS&facets[duoarea][]=R10&facets[duoarea][]=R20&facets[duoarea][]=R30&facets[duoarea][]=R40&facets[duoarea][]=R50&sort[0][column]=period&sort[0][direction]=desc&length=12",
+    modelCatalog: () => `${MODELS}/catalog`,
+    modelRuns: model => `${MODELS}/runs/${enc(model)}`,
+    modelHours: (model, run) => `${MODELS}/hours/${enc(model)}/${enc(run)}`,
+    modelPrefetch: (model, run, field, first) => `${MODELS}/prefetch?model=${enc(model)}&run=${enc(run)}&field=${enc(field)}&first=${enc(first || 0)}`,
+    modelStatus: (model, run, field) => `${MODELS}/status/${enc(model)}/${enc(run)}/${enc(field)}`,
+    modelFrame: (model, run, field, fhr) => `${MODELS}/frame/${enc(model)}/${enc(run)}/${enc(field)}/${enc(fhr)}.webp`,
+    modelContour: (model, run, field, fhr) => `${MODELS}/contour/${enc(model)}/${enc(run)}/${enc(field)}/${enc(fhr)}.geojson`,
+    modelValue: (model, run, field, fhr, lat, lon) => `${MODELS}/value?model=${enc(model)}&run=${enc(run)}&field=${enc(field)}&fhr=${enc(fhr)}&lat=${Number(lat).toFixed(4)}&lon=${Number(lon).toFixed(4)}`,
+    soundingImage: (lat, lon, fhr) => `${RENDER}/api/sounding?lat=${Number(lat).toFixed(4)}&lon=${Number(lon).toFixed(4)}&fhr=${enc(fhr)}`,
+    soundingJson: (lat, lon) => `${API_SERVER}/sounding?lat=${Number(lat).toFixed(4)}&lon=${Number(lon).toFixed(4)}&model=hrrr&hours=19`,
+    paletteFetch: url => `https://weatherpower.app/api/palette-fetch/?url=${enc(url)}`,
+    eiaGas: () => "https://api.eia.gov/v2/petroleum/pri/gnd/data/?frequency=weekly&data[0]=value&facets[process][]=PTE" +
+      ["EPMR", "EPMM", "EPMP", "EPD2D"].map(p => `&facets[product][]=${p}`).join("") +
+      "&sort[0][column]=period&sort[0][direction]=desc&length=500&api_key=DEMO_KEY",
+    mapboxDirections: (a, b) => `https://api.mapbox.com/directions/v5/mapbox/driving/${Number(a.longitude)},${Number(a.latitude)};${Number(b.longitude)},${Number(b.latitude)}` +
+      `?alternatives=false&geometries=geojson&overview=full&steps=false&language=en&continue_straight=true&access_token=${enc(typeof MAPBOX_TOKEN === "string" ? MAPBOX_TOKEN : "")}`,
     nhcCurrentStorms: () => "https://www.nhc.noaa.gov/CurrentStorms.json",
     nhcMapServer: "https://mapservices.weather.noaa.gov/tropical/rest/services/tropical/NHC_tropical_weather/MapServer",
-    osrmRoute: (a, b) => `https://router.project-osrm.org/route/v1/driving/${a.longitude},${a.latitude};${b.longitude},${b.latitude}?overview=simplified&geometries=geojson`,
     nwsPoint: (lat, lon) => `https://api.weather.gov/points/${lat.toFixed(4)},${lon.toFixed(4)}`,
     nwsAlertsPoint: (lat, lon) => `https://api.weather.gov/alerts/active?point=${lat.toFixed(4)},${lon.toFixed(4)}`
   };
@@ -52,20 +60,74 @@
   const escA = value => (typeof escapeAttr === "function" ? escapeAttr(value) : esc(value));
   const say = message => { try { toast(message); } catch (_) { console.log(message); } };
 
-  async function getJson(url, options = {}) {
-    if (typeof fetchJsonWithNativeFallback === "function") {
-      return fetchJsonWithNativeFallback(url, Object.assign({ timeoutMs: 15000 }, options));
+  const canNative = url => !!(window.WeatherPowerAndroid && typeof window.WeatherPowerAndroid.fetchUrlAsync === "function" && /^https:\/\//i.test(url) && typeof fetchNativeTextAsync === "function");
+
+  // The native bridge reports failures as {"__wpError":"HTTP 404 {...server body...}"}; recover the server's message.
+  function nativeError(raw) {
+    const text = String(raw || "");
+    const status = text.match(/^HTTP (\d{3})\s*/);
+    if (status) {
+      try { const body = JSON.parse(text.slice(status[0].length)); if (body && (body.error || body.message)) return body.error || body.message; } catch (_) {}
+      return `HTTP ${status[1]}`;
     }
-    const res = await fetch(url, { cache: "no-store", headers: options.headers });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return res.json();
+    return text || "Request failed";
+  }
+
+  async function nativeText(url, timeoutMs) {
+    const text = await fetchNativeTextAsync(url, timeoutMs || 15000);
+    if (/^\{"__wpError"/.test(text)) {
+      let message = "Request failed";
+      try { message = nativeError(JSON.parse(text).__wpError); } catch (_) {}
+      throw new Error(message);
+    }
+    return text;
+  }
+
+  // JSON GET that keeps the server's own error text ({"error": "..."}), falling back to the native
+  // bridge when the WebView blocks the request (CORS) or the network call fails.
+  async function getJson(url, options = {}) {
+    if (options.preferNative && canNative(url)) return JSON.parse(await nativeText(url, options.timeoutMs));
+    let res;
+    try {
+      res = await fetch(url, { cache: "no-store", credentials: "omit", headers: Object.assign({ Accept: "application/json" }, options.headers || {}) });
+    } catch (networkError) {
+      if (canNative(url)) return JSON.parse(await nativeText(url, options.timeoutMs));
+      throw networkError;
+    }
+    let body = null;
+    try { body = await res.json(); } catch (_) {}
+    if (!res.ok) throw new Error((body && (body.error || body.message)) || `HTTP ${res.status}`);
+    if (body === null) throw new Error("The server returned no data");
+    return body;
   }
 
   async function getText(url, options = {}) {
-    if (typeof fetchTextWithNativeFallback === "function") return fetchTextWithNativeFallback(url, Object.assign({ timeoutMs: 15000 }, options));
-    const res = await fetch(url, { cache: "no-store" });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return res.text();
+    let res;
+    try {
+      res = await fetch(url, { cache: "no-store", credentials: "omit", headers: options.headers || undefined });
+    } catch (networkError) {
+      if (canNative(url)) return nativeText(url, options.timeoutMs);
+      throw networkError;
+    }
+    const text = await res.text();
+    if (!res.ok) {
+      let message = `HTTP ${res.status}`;
+      try { const body = JSON.parse(text); message = body.error || body.message || message; } catch (_) {}
+      throw new Error(message);
+    }
+    return text;
+  }
+
+  // <script> loading needs no CORS; the WeatherPower gas feeds are JS files that call a global callback.
+  function loadScript(src) {
+    return new Promise((resolve, reject) => {
+      const tag = document.createElement("script");
+      tag.src = src;
+      tag.async = true;
+      tag.onload = () => { tag.remove(); resolve(); };
+      tag.onerror = () => { tag.remove(); reject(new Error(`Could not load ${src.replace(/\?.*$/, "")}`)); };
+      document.head.appendChild(tag);
+    });
   }
 
   const NWS = { headers: { Accept: "application/geo+json" } };
@@ -87,6 +149,18 @@
       if (obj[key] !== undefined && obj[key] !== null && obj[key] !== "") return obj[key];
     }
     return fallback;
+  }
+
+  // Property lookup that ignores field-name case (ArcGIS services differ between upper and lower case).
+  function prop(props, name) {
+    if (!props) return undefined;
+    if (props[name] !== undefined) return props[name];
+    const lower = name.toLowerCase();
+    if (props[lower] !== undefined) return props[lower];
+    const upper = name.toUpperCase();
+    if (props[upper] !== undefined) return props[upper];
+    const key = Object.keys(props).find(k => k.toLowerCase() === lower);
+    return key ? props[key] : undefined;
   }
 
   function num(value) {
@@ -261,7 +335,7 @@
   actions.openUrl = el => openExternal(el.dataset.url);
 
   window.WPX = Object.assign(window.WPX || {}, {
-    API, prefs, savePrefs, esc, escA, say, getJson, getText, NWS, listFrom, pick, num, timeLabel, compass, haversineMiles,
+    API, prefs, savePrefs, esc, escA, say, getJson, getText, loadScript, NWS, listFrom, pick, prop, num, timeLabel, compass, haversineMiles,
     mapReady, quietErrors, setRaster, removeLayerAndSource, setGeoJson, addLayerOnce, fc,
     openOverlay, closeOverlay, topOverlay, backHandlers, actions, isTvLaunch, openExternal,
     basemapStyle: () => (typeof mapLibreStyle === "function" ? mapLibreStyle() : "https://weatherpower.app/maps/weatherpower/style.json")
